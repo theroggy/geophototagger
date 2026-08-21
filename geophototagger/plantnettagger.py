@@ -1,43 +1,45 @@
-import logging
-from pathlib import Path
-from typing import List, Optional
-import requests
+"""PlantNet image identification helpers."""
+
 import json
+import logging
 import pprint
+from pathlib import Path
 
 import _config_helper as config_helper
+import requests
 
 logger = logging.getLogger(__name__)
 
 
 def tag_plantnet(
-    image_paths: List[Path],
+    image_paths: list[Path],
     api_key: str,
+    *,
     project: str = "all",
     lang: str = "en",
-    cache_dir: Optional[Path] = None,
+    cache_dir: Path | None = None,
     force: bool = False,
 ) -> dict:
-    """Use plantnet to determine the plant type for the images passed.
+    """Use PlantNet to identify the plant type in one or more images.
 
     All images passed should be of the same plant type.
 
     Args:
-        image_paths (List[Path]): list of images to determine the plant species for.
-        api_key (str): the api key to use.
-        project (str, optional): _description_. Defaults to "all".
-        lang (str, optional): _description_. Defaults to "en".
-        cache_dir (Optional[Path], optional): _description_. Defaults to None.
-        force (bool, optional): _description_. Defaults to False.
+        image_paths: Images to submit for plant identification.
+        api_key: API key used for the PlantNet request.
+        project: PlantNet project to query.
+        lang: Response language.
+        cache_dir: Optional directory for cached JSON responses.
+        force: Whether to ignore an existing cached response.
 
     Returns:
-        dict: _description_
+        Parsed PlantNet response.
     """
     # Check if cache_dir is provided and if the cache file exists
     if cache_dir is not None:
         cache_path = cache_dir / f"{image_paths[0].name}.json"
         if not force and cache_path.exists():
-            with open(cache_path, "r") as f:
+            with cache_path.open() as f:
                 logger.info(f"Using cached result for {image_paths[0].name}.")
                 return json.load(f)
 
@@ -46,7 +48,7 @@ def tag_plantnet(
     )
 
     files = [
-        ("images", (str(image_path), open(image_path, "rb")))
+        ("images", (str(image_path), image_path.open("rb")))
         for image_path in image_paths
     ]
 
@@ -62,13 +64,21 @@ def tag_plantnet(
 
     # Save the result to the cache file
     if cache_dir is not None:
-        with open(cache_path, "w") as f:
+        with cache_path.open("w") as f:
             json.dump(result, f)
 
     return result
 
 
 def plantnet_common_names(plantnet_result: dict) -> list[dict]:
+    """Extract scored common names from a PlantNet response.
+
+    Args:
+        plantnet_result: Parsed PlantNet response containing ``results``.
+
+    Returns:
+        Entries containing non-empty common-name lists and their scores.
+    """
     common_names = []
     for result in plantnet_result["results"]:
         if len(result["species"]["commonNames"]) > 0:

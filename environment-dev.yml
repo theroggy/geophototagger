@@ -1,0 +1,17 @@
+name: geophototagger-dev
+channels:
+  - conda-forge
+dependencies:
+  - python =3.10
+  - pip
+  # required
+  - keras
+  - pytorch
+  - pillow
+  # testing
+  - pytest
+  - pytest-cov
+  # linting
+  - mypy ==2.3.0
+  - pre-commit
+  - ruff ==0.16.3
