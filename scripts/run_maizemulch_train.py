@@ -1,5 +1,6 @@
 """Run a configured geophototagger training job directly."""
 
+import logging
 from pathlib import Path
 
 from geophototagger.custom.classifier import train_model
@@ -12,6 +13,9 @@ from geophototagger.custom.dataset import (
 
 def main() -> None:
     """Generate train/validation/test manifests and train the configured model."""
+    logging.basicConfig(level=logging.INFO)
+
+    logging.info("Starting the training run.")
     # Edit these values for the training run you want to execute.
     TRAIN_DATASET_ROOT = Path(r"X:\Monitoring\geophototagger\trainingsdata\train")
     VALIDATION_DATASET_ROOT = Path(
@@ -38,8 +42,9 @@ def main() -> None:
     misclassified_dir = training_dir / "misclassified"
     misclassified_dir.mkdir(parents=True, exist_ok=True)
     classes = {"korrelmais"}
-    image_size = (640, 640)
+    image_size = (1024, 1024)
 
+    logging.info("Writing training manifests.")
     write_manifest(
         TRAIN_DATASET_ROOT,
         train_manifest_path,

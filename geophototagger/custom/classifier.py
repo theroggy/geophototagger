@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
@@ -154,6 +155,13 @@ def _write_misclassified(
     """Copy images whose predicted label set does not match ground truth."""
     if not records:
         return
+
+    report_path = output_dir / "classification-results.csv"
+    if report_path.exists():
+        logging.info("Classification results already exist at %s", report_path)
+        return
+
+    logging.info("Writing misclassified images to %s", output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     keras = _keras()
     image_sequence_class = _make_image_sequence_class(keras)
@@ -164,30 +172,125 @@ def _write_misclassified(
         records, image_size, batch_size=batch_size, **dataset_kwargs
     )
     probabilities = model.predict(dataset, verbose=0)
-    for record, probability_row in zip(records, probabilities, strict=True):
-        predicted_probabilities = dict(
-            zip(vocabulary, (float(value) for value in probability_row), strict=True)
-        )
-        predicted_labels = {
-            label
-            for label, probability in predicted_probabilities.items()
-            if probability >= threshold
+    probability_columns = [f"{label}_probability" for label in vocabulary]
+    correctly_classified_count = 0
+    label_statistics = {
+        label: {
+            "true_positives": 0,
+            "false_positives": 0,
+            "true_negatives": 0,
+            "false_negatives": 0,
         }
-        if predicted_labels != set(record.labels):
-            shutil.copy2(record.image_path, output_dir / record.image_path.name)
-            report_path = output_dir / f"{record.image_path.stem}.json"
-            report_path.write_text(
-                json.dumps(
-                    {
-                        "image": str(record.image_path),
-                        "expected_labels": list(record.labels),
-                        "predicted_labels": sorted(predicted_labels),
-                        "probabilities": predicted_probabilities,
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
+        for label in vocabulary
+    }
+    with report_path.open("w", encoding="utf-8", newline="") as report_file:
+        writer = csv.DictWriter(
+            report_file,
+            fieldnames=[
+                "image_path",
+                "expected_labels",
+                "predicted_labels",
+                "correctly_classified",
+                *probability_columns,
+            ],
+        )
+        writer.writeheader()
+        for record, probability_row in zip(records, probabilities, strict=True):
+            predicted_probabilities = dict(
+                zip(
+                    vocabulary,
+                    (float(value) for value in probability_row),
+                    strict=True,
+                )
             )
+            predicted_labels = {
+                label
+                for label, probability in predicted_probabilities.items()
+                if probability >= threshold
+            }
+            correctly_classified = predicted_labels == set(record.labels)
+            correctly_classified_count += correctly_classified
+            for label in vocabulary:
+                expected = label in record.labels
+                predicted = label in predicted_labels
+                if expected and predicted:
+                    label_statistics[label]["true_positives"] += 1
+                elif predicted:
+                    label_statistics[label]["false_positives"] += 1
+                elif expected:
+                    label_statistics[label]["false_negatives"] += 1
+                else:
+                    label_statistics[label]["true_negatives"] += 1
+            writer.writerow(
+                {
+                    "image_path": str(record.image_path),
+                    "expected_labels": ";".join(record.labels),
+                    "predicted_labels": ";".join(sorted(predicted_labels)),
+                    "correctly_classified": correctly_classified,
+                    **{
+                        f"{label}_probability": predicted_probabilities[label]
+                        for label in vocabulary
+                    },
+                }
+            )
+            if not correctly_classified:
+                shutil.copy2(record.image_path, output_dir / record.image_path.name)
+                misclassified_report_path = (
+                    output_dir / f"{record.image_path.stem}.json"
+                )
+                misclassified_report_path.write_text(
+                    json.dumps(
+                        {
+                            "image": str(record.image_path),
+                            "expected_labels": list(record.labels),
+                            "predicted_labels": sorted(predicted_labels),
+                            "probabilities": predicted_probabilities,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+    label_metrics = {}
+    for label, counts in label_statistics.items():
+        precision_denominator = counts["true_positives"] + counts["false_positives"]
+        recall_denominator = counts["true_positives"] + counts["false_negatives"]
+        precision = (
+            counts["true_positives"] / precision_denominator
+            if precision_denominator
+            else 0.0
+        )
+        recall = (
+            counts["true_positives"] / recall_denominator if recall_denominator else 0.0
+        )
+        label_metrics[label] = {
+            **counts,
+            "accuracy": (counts["true_positives"] + counts["true_negatives"])
+            / len(records),
+            "precision": precision,
+            "recall": recall,
+            "f1_score": 2 * precision * recall / (precision + recall)
+            if precision + recall
+            else 0.0,
+        }
+    misclassified_count = len(records) - correctly_classified_count
+    statistics_path = output_dir / "classification-statistics.json"
+    statistics_path.write_text(
+        json.dumps(
+            {
+                "classification_threshold": threshold,
+                "total_files": len(records),
+                "correctly_classified_files": correctly_classified_count,
+                "correctly_classified_percentage": 100
+                * correctly_classified_count
+                / len(records),
+                "misclassified_files": misclassified_count,
+                "misclassified_percentage": 100 * misclassified_count / len(records),
+                "per_label": label_metrics,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def build_model(
@@ -249,6 +352,138 @@ def build_model(
             keras.metrics.Precision(name="precision"),
             keras.metrics.Recall(name="recall"),
         ],
+    )
+    return model
+
+
+def _split_training_records(
+    records: list[ImageRecord],
+    validation_records: list[ImageRecord] | None,
+    validation_split: float,
+    seed: int,
+) -> tuple[list[ImageRecord], list[ImageRecord]]:
+    """Split training records while preserving explicit validation data."""
+    if validation_records is not None:
+        return records, validation_records
+    if not validation_split:
+        return records, []
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(records))
+    split_at = int(len(records) * (1 - validation_split))
+    return (
+        [records[index] for index in order[:split_at]],
+        [records[index] for index in order[split_at:]],
+    )
+
+
+def _fit_model(
+    records: list[ImageRecord],
+    vocabulary: list[str],
+    output_path: Path,
+    *,
+    validation_records: list[ImageRecord],
+    image_size: tuple[int, int],
+    backbone: str,
+    weights: str | None,
+    epochs: int,
+    seed: int,
+    threshold: float,
+    augment: bool,
+    class_weighting: bool,
+    early_stopping_patience: int,
+    batch_size: int,
+    workers: int,
+) -> Any:
+    """Fit, checkpoint, and return a model using prepared record splits."""
+    logging.info("Starting training")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    keras = _keras()
+    keras.utils.set_random_seed(seed)
+    image_sequence_class = _make_image_sequence_class(keras)
+    dataset_kwargs: dict[str, Any] = (
+        {"workers": workers, "use_multiprocessing": False} if workers else {}
+    )
+    labels = np.array(
+        [[int(label in record.labels) for label in vocabulary] for record in records]
+    )
+    class_weights = calculate_class_weights(labels.tolist(), vocabulary)
+    train_labels = np.array(
+        [[int(label in record.labels) for label in vocabulary] for record in records]
+    )
+    validation_dataset = None
+    if validation_records:
+        validation_labels = np.array(
+            [
+                [int(label in record.labels) for label in vocabulary]
+                for record in validation_records
+            ]
+        )
+        validation_dataset = image_sequence_class(
+            validation_records,
+            image_size,
+            labels=validation_labels,
+            batch_size=batch_size,
+            **dataset_kwargs,
+        )
+    sample_weights = (
+        np.array(_sample_weights(train_labels.tolist(), vocabulary, class_weights))
+        if class_weighting
+        else None
+    )
+    train_dataset = image_sequence_class(
+        records,
+        image_size,
+        labels=train_labels,
+        sample_weights=sample_weights,
+        batch_size=batch_size,
+        shuffle=True,
+        **dataset_kwargs,
+    )
+    model = build_model(
+        len(vocabulary),
+        image_size=image_size,
+        backbone=backbone,
+        weights=weights,
+        augment=augment,
+    )
+    fit_kwargs: dict[str, Any] = {"epochs": epochs}
+    if validation_dataset is not None:
+        fit_kwargs["validation_data"] = validation_dataset
+    monitor = "val_loss" if validation_dataset is not None else "loss"
+    callbacks: list[Any] = [
+        keras.callbacks.CSVLogger(output_path.with_suffix(".csv")),
+        keras.callbacks.ModelCheckpoint(
+            output_path, monitor=monitor, save_best_only=True
+        ),
+    ]
+    if early_stopping_patience:
+        callbacks.append(
+            keras.callbacks.EarlyStopping(
+                monitor=monitor,
+                patience=early_stopping_patience,
+                restore_best_weights=True,
+            )
+        )
+    fit_kwargs["callbacks"] = callbacks
+
+    model.fit(train_dataset, **fit_kwargs)
+    model = keras.models.load_model(output_path)
+    metadata_path = output_path.with_suffix(".json")
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "labels": vocabulary,
+                "image_size": list(image_size),
+                "backbone": backbone,
+                "threshold": threshold,
+                "augmentation": augment,
+                "class_weighting": class_weighting,
+                "class_weights": class_weights,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
     )
     return model
 
@@ -325,116 +560,32 @@ def train_model(
         )
     if not 0 <= validation_split < 1:
         raise ValueError("validation_split must be between 0 and 1")
+    train_records, validation_records_for_reporting = _split_training_records(
+        records, validation_records, validation_split, seed
+    )
     if output_path.exists() and not force:
         logging.info("Model already exists at %s; skipping training", output_path)
-        return
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    keras = _keras()
-    keras.utils.set_random_seed(seed)
-    image_sequence_class = _make_image_sequence_class(keras)
-    dataset_kwargs: dict[str, Any] = (
-        {"workers": workers, "use_multiprocessing": False} if workers else {}
-    )
-    labels = np.array(
-        [[int(label in record.labels) for label in vocabulary] for record in records]
-    )
-    class_weights = calculate_class_weights(labels.tolist(), vocabulary)
-
-    train_records = records
-    train_labels = labels
-    validation_dataset = None
-    if validation_records is not None:
-        validation_labels = np.array(
-            [
-                [int(label in record.labels) for label in vocabulary]
-                for record in validation_records
-            ]
-        )
-        validation_dataset = image_sequence_class(
-            validation_records,
-            image_size,
-            labels=validation_labels,
+        model = _keras().models.load_model(output_path)
+    else:
+        logging.info("Training model to %s", output_path)
+        model = _fit_model(
+            train_records,
+            vocabulary,
+            output_path,
+            validation_records=validation_records_for_reporting,
+            image_size=image_size,
+            backbone=backbone,
+            weights=weights,
+            epochs=epochs,
+            seed=seed,
+            threshold=threshold,
+            augment=augment,
+            class_weighting=class_weighting,
+            early_stopping_patience=early_stopping_patience,
             batch_size=batch_size,
-            **dataset_kwargs,
-        )
-    elif validation_split:
-        # Split records here since PyDataset inputs don't support Keras's
-        # built-in validation_split (which requires an in-memory array).
-        rng = np.random.default_rng(seed)
-        order = rng.permutation(len(records))
-        split_at = int(len(records) * (1 - validation_split))
-        train_indices, validation_indices = order[:split_at], order[split_at:]
-        train_records = [records[i] for i in train_indices]
-        train_labels = labels[train_indices]
-        validation_dataset = image_sequence_class(
-            [records[i] for i in validation_indices],
-            image_size,
-            labels=labels[validation_indices],
-            batch_size=batch_size,
-            **dataset_kwargs,
+            workers=workers,
         )
 
-    sample_weights = (
-        np.array(_sample_weights(train_labels.tolist(), vocabulary, class_weights))
-        if class_weighting
-        else None
-    )
-    train_dataset = image_sequence_class(
-        train_records,
-        image_size,
-        labels=train_labels,
-        sample_weights=sample_weights,
-        batch_size=batch_size,
-        shuffle=True,
-        **dataset_kwargs,
-    )
-    model = build_model(
-        len(vocabulary),
-        image_size=image_size,
-        backbone=backbone,
-        weights=weights,
-        augment=augment,
-    )
-    fit_kwargs: dict[str, Any] = {"epochs": epochs}
-    if validation_dataset is not None:
-        fit_kwargs["validation_data"] = validation_dataset
-    monitor = "val_loss" if validation_dataset is not None else "loss"
-    callbacks: list[Any] = [
-        keras.callbacks.ModelCheckpoint(
-            output_path, monitor=monitor, save_best_only=True
-        )
-    ]
-    if early_stopping_patience:
-        callbacks.append(
-            keras.callbacks.EarlyStopping(
-                monitor=monitor,
-                patience=early_stopping_patience,
-                restore_best_weights=True,
-            )
-        )
-    fit_kwargs["callbacks"] = callbacks
-
-    model.fit(train_dataset, **fit_kwargs)
-    # ModelCheckpoint already saved the best epoch; reload it so the
-    # returned model and metadata match what is on disk.
-    model = keras.models.load_model(output_path)
-    metadata_path = output_path.with_suffix(".json")
-    metadata_path.write_text(
-        json.dumps(
-            {
-                "labels": vocabulary,
-                "image_size": list(image_size),
-                "backbone": backbone,
-                "threshold": threshold,
-                "augmentation": augment,
-                "class_weighting": class_weighting,
-                "class_weights": class_weights,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
     if misclassified_dir is not None:
         _write_misclassified(
             model,
@@ -448,7 +599,7 @@ def train_model(
         )
         _write_misclassified(
             model,
-            validation_dataset.records if validation_dataset else [],
+            validation_records_for_reporting,
             vocabulary,
             image_size=image_size,
             threshold=threshold,

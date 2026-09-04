@@ -1,7 +1,11 @@
+import csv
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from geophototagger.custom import classifier
 from geophototagger.custom.classifier import calculate_class_weights
 from geophototagger.custom.dataset import (
     ImageRecord,
@@ -111,3 +115,130 @@ def test_class_weights_balance_positive_and_negative_examples() -> None:
 
     assert weights["common"] == {"positive": 1.0, "negative": 1.0}
     assert weights["rare"] == {"positive": 2.0, "negative": 0.6666666666666666}
+
+
+def test_misclassification_report_includes_correct_and_incorrect_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_image = tmp_path / "first.jpg"
+    second_image = tmp_path / "second.jpg"
+    first_image.write_bytes(b"first")
+    second_image.write_bytes(b"second")
+
+    class FakeDataset:
+        def __init__(self, records, *_args, **_kwargs) -> None:
+            self.records = records
+
+    class FakeModel:
+        def predict(self, _dataset, verbose: int) -> list[list[float]]:
+            assert verbose == 0
+            return [[0.9, 0.1], [0.8, 0.2]]
+
+    monkeypatch.setattr(classifier, "_keras", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        classifier, "_make_image_sequence_class", lambda _keras: FakeDataset
+    )
+
+    output_dir = tmp_path / "report"
+    classifier._write_misclassified(
+        FakeModel(),
+        [
+            ImageRecord(first_image, ("maize",)),
+            ImageRecord(second_image, ("manure",)),
+        ],
+        ["maize", "manure"],
+        image_size=(224, 224),
+        threshold=0.5,
+        output_dir=output_dir,
+        workers=0,
+    )
+
+    with (output_dir / "classification-results.csv").open(
+        encoding="utf-8", newline=""
+    ) as report_file:
+        rows = list(csv.DictReader(report_file))
+
+    assert rows == [
+        {
+            "image_path": str(first_image),
+            "expected_labels": "maize",
+            "predicted_labels": "maize",
+            "correctly_classified": "True",
+            "maize_probability": "0.9",
+            "manure_probability": "0.1",
+        },
+        {
+            "image_path": str(second_image),
+            "expected_labels": "manure",
+            "predicted_labels": "maize",
+            "correctly_classified": "False",
+            "maize_probability": "0.8",
+            "manure_probability": "0.2",
+        },
+    ]
+    assert not (output_dir / "first.jpg").exists()
+    assert (output_dir / "second.jpg").exists()
+    assert (output_dir / "second.json").exists()
+    statistics = json.loads(
+        (output_dir / "classification-statistics.json").read_text(encoding="utf-8")
+    )
+    assert statistics["total_files"] == 2
+    assert statistics["correctly_classified_files"] == 1
+    assert statistics["correctly_classified_percentage"] == 50.0
+    assert statistics["misclassified_files"] == 1
+    assert statistics["per_label"]["maize"] == {
+        "true_positives": 1,
+        "false_positives": 1,
+        "true_negatives": 0,
+        "false_negatives": 0,
+        "accuracy": 0.5,
+        "precision": 0.5,
+        "recall": 1.0,
+        "f1_score": 2 / 3,
+    }
+
+
+def test_existing_model_skips_training_and_still_writes_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_path = tmp_path / "model.keras"
+    model_path.write_bytes(b"model")
+    training_record = ImageRecord(tmp_path / "training.jpg", ("maize",))
+    validation_record = ImageRecord(tmp_path / "validation.jpg", ("maize",))
+    test_record = ImageRecord(tmp_path / "test.jpg", ("maize",))
+    model = object()
+    reports = []
+
+    monkeypatch.setattr(
+        classifier,
+        "_keras",
+        lambda: SimpleNamespace(models=SimpleNamespace(load_model=lambda _path: model)),
+    )
+    monkeypatch.setattr(
+        classifier,
+        "_fit_model",
+        lambda *_args, **_kwargs: pytest.fail("Existing models must not be trained"),
+    )
+    monkeypatch.setattr(
+        classifier,
+        "_write_misclassified",
+        lambda reported_model, reported_records, *_args, **kwargs: reports.append(
+            (reported_model, reported_records, kwargs["output_dir"].name)
+        ),
+    )
+
+    returned_model = classifier.train_model(
+        [training_record],
+        ["maize"],
+        model_path,
+        validation_records=[validation_record],
+        test_records=[test_record],
+        misclassified_dir=tmp_path / "reports",
+    )
+
+    assert returned_model is model
+    assert reports == [
+        (model, [training_record], "train_wrong"),
+        (model, [validation_record], "validation_wrong"),
+        (model, [test_record], "test_wrong"),
+    ]
