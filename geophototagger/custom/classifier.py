@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import shutil
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +143,39 @@ def _sample_weights(
     ]
 
 
+def _prediction_progress_callback(
+    keras: Any, record_count: int, batch_size: int
+) -> Any:
+    """Create a callback that logs prediction progress at most once a minute."""
+    batch_count = -(-record_count // batch_size)
+    logging.info("Predicting %d files in %d batches", record_count, batch_count)
+    started_at = time.monotonic()
+    last_log_time = started_at
+
+    def log_progress(batch: int, logs: dict[str, Any] | None = None) -> None:
+        del logs
+        nonlocal last_log_time
+        completed_batches = batch + 1
+        current_time = time.monotonic()
+        if completed_batches != batch_count and current_time - last_log_time < 60:
+            return
+        completed_files = min(completed_batches * batch_size, record_count)
+        elapsed_seconds = current_time - started_at
+        remaining_seconds = round(
+            elapsed_seconds * (batch_count - completed_batches) / completed_batches
+        )
+        logging.info(
+            "Prediction progress: %d/%d files (%d%%); estimated %s remaining",
+            completed_files,
+            record_count,
+            100 * completed_files // record_count,
+            timedelta(seconds=remaining_seconds),
+        )
+        last_log_time = current_time
+
+    return keras.callbacks.LambdaCallback(on_predict_batch_end=log_progress)
+
+
 def _write_misclassified(
     model: Any,
     records: list[ImageRecord],
@@ -171,7 +206,11 @@ def _write_misclassified(
     dataset = image_sequence_class(
         records, image_size, batch_size=batch_size, **dataset_kwargs
     )
-    probabilities = model.predict(dataset, verbose=0)
+    probabilities = model.predict(
+        dataset,
+        verbose=0,
+        callbacks=[_prediction_progress_callback(keras, len(records), batch_size)],
+    )
     probability_columns = [f"{label}_probability" for label in vocabulary]
     correctly_classified_count = 0
     label_statistics = {
@@ -651,7 +690,11 @@ def predict_images(
     dataset = image_sequence_class(
         records, image_size, batch_size=batch_size, **dataset_kwargs
     )
-    probabilities = model.predict(dataset, verbose=0)
+    probabilities = model.predict(
+        dataset,
+        verbose=0,
+        callbacks=[_prediction_progress_callback(keras, len(image_paths), batch_size)],
+    )
     return [
         dict(
             zip(
@@ -679,7 +722,9 @@ def predict_image(model_path: Path, image_path: Path) -> dict[str, float]:
     keras = _keras()
     model = keras.models.load_model(model_path)
     image = _load_images([ImageRecord(image_path, ())], image_size)
+    logging.info("Predicting %s", image_path)
     probabilities = model.predict(image, verbose=0)[0]
+    logging.info("Prediction complete for %s", image_path)
     return dict(
         zip(metadata["labels"], (float(value) for value in probabilities), strict=True)
     )

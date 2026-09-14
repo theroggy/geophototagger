@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,7 +67,7 @@ def discover_records(
         name_parts = image_path.stem.rsplit(FORMATTED_LABEL_SEPARATOR, 1)
         if len(name_parts) != 2 or not name_parts[1]:
             raise ValueError(
-                f"Formatted image name does not contain a label: {image_path.name}"
+                f"Formatted image name does not contain a label: {image_path}"
             )
         labels = {label for label in name_parts[1].split("-") if label}
         if allowed_labels is None:
@@ -90,6 +91,7 @@ def write_manifest(
     classes: Collection[str] | None = None,
     *,
     include_unmatched_as_negative: bool = True,
+    force: bool = False,
 ) -> int:
     """Write a deterministic ``image_path,labels`` CSV manifest.
 
@@ -97,15 +99,21 @@ def write_manifest(
         dataset_root: Root directory used to make paths relative where possible.
         manifest_path: Destination path for the CSV file.
         records: Records to write. If omitted, records are discovered first.
-        label_whitelist: Optional labels to retain while discovering or writing
+        classes: Optional labels to retain while discovering or writing
             records.
-        include_unmatched_as_negative: When ``label_whitelist`` is set, keep
+        include_unmatched_as_negative: When ``classes`` is set, keep
             unmatched images as explicit negative examples instead of
             dropping them.
+        force: Replace an existing manifest. Otherwise, an existing manifest is
+            left unchanged.
 
     Returns:
         Number of records written to the manifest.
     """
+    if manifest_path.exists() and not force:
+        logging.info("Manifest already exists, leaving it unchanged: %s", manifest_path)
+        return 0
+
     if records is None:
         records = discover_records(
             dataset_root,
@@ -139,6 +147,7 @@ def write_manifest(
                     "labels": LABEL_SEPARATOR.join(record.labels),
                 }
             )
+
     return len(records)
 
 

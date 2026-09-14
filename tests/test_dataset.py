@@ -50,6 +50,21 @@ def test_manifest_round_trip_supports_multiple_labels(tmp_path: Path) -> None:
     assert encode_labels(records, ["maize", "manure"]) == [[1, 1]]
 
 
+def test_manifest_skips_existing_file_unless_forced(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    image_path = tmp_path / "photo__maize.jpg"
+    image_path.write_bytes(b"image")
+    manifest_path = tmp_path / "images.csv"
+    manifest_path.write_text("original manifest", encoding="utf-8")
+
+    assert write_manifest(tmp_path, manifest_path) == 0
+
+    assert manifest_path.read_text(encoding="utf-8") == "original manifest"
+    assert "Manifest already exists, leaving it unchanged" in caplog.text
+    assert write_manifest(tmp_path, manifest_path, force=True) == 1
+
+
 def test_manifest_rejects_missing_images(tmp_path: Path) -> None:
     manifest_path = tmp_path / "images.csv"
     manifest_path.write_text("image_path,labels\nmissing.jpg,maize\n", encoding="utf-8")
@@ -117,8 +132,37 @@ def test_class_weights_balance_positive_and_negative_examples() -> None:
     assert weights["rare"] == {"positive": 2.0, "negative": 0.6666666666666666}
 
 
+def test_prediction_progress_logs_once_per_minute_and_on_completion(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock_values = iter([0.0, 30.0, 60.0, 90.0, 91.0])
+    monkeypatch.setattr(classifier.time, "monotonic", lambda: next(clock_values))
+    keras = SimpleNamespace(
+        callbacks=SimpleNamespace(
+            LambdaCallback=lambda **kwargs: SimpleNamespace(**kwargs)
+        )
+    )
+
+    callback = classifier._prediction_progress_callback(keras, 100, 10)
+    callback.on_predict_batch_end(0, logs={})
+    callback.on_predict_batch_end(1)
+    callback.on_predict_batch_end(2)
+    callback.on_predict_batch_end(9)
+
+    assert "Prediction progress: 10/100 files (10%)" not in caplog.text
+    assert (
+        "Prediction progress: 20/100 files (20%); estimated 0:04:00 remaining"
+        in caplog.text
+    )
+    assert "Prediction progress: 30/100 files (30%)" not in caplog.text
+    assert (
+        "Prediction progress: 100/100 files (100%); estimated 0:00:00 remaining"
+        in caplog.text
+    )
+
+
 def test_misclassification_report_includes_correct_and_incorrect_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     first_image = tmp_path / "first.jpg"
     second_image = tmp_path / "second.jpg"
@@ -130,11 +174,22 @@ def test_misclassification_report_includes_correct_and_incorrect_records(
             self.records = records
 
     class FakeModel:
-        def predict(self, _dataset, verbose: int) -> list[list[float]]:
+        def predict(
+            self, _dataset, verbose: int, callbacks: list[SimpleNamespace]
+        ) -> list[list[float]]:
             assert verbose == 0
+            callbacks[0].on_predict_batch_end(0)
             return [[0.9, 0.1], [0.8, 0.2]]
 
-    monkeypatch.setattr(classifier, "_keras", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        classifier,
+        "_keras",
+        lambda: SimpleNamespace(
+            callbacks=SimpleNamespace(
+                LambdaCallback=lambda **kwargs: SimpleNamespace(**kwargs)
+            )
+        ),
+    )
     monkeypatch.setattr(
         classifier, "_make_image_sequence_class", lambda _keras: FakeDataset
     )
@@ -179,6 +234,7 @@ def test_misclassification_report_includes_correct_and_incorrect_records(
     assert not (output_dir / "first.jpg").exists()
     assert (output_dir / "second.jpg").exists()
     assert (output_dir / "second.json").exists()
+    assert "Prediction progress: 2/2 files (100%)" in caplog.text
     statistics = json.loads(
         (output_dir / "classification-statistics.json").read_text(encoding="utf-8")
     )

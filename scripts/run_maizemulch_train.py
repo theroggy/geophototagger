@@ -43,22 +43,26 @@ def main() -> None:
     misclassified_dir.mkdir(parents=True, exist_ok=True)
     classes = {"korrelmais"}
     image_size = (1024, 1024)
+    force = False
 
     logging.info("Writing training manifests.")
     write_manifest(
         TRAIN_DATASET_ROOT,
         train_manifest_path,
         classes=classes,
+        force=force,
     )
     write_manifest(
         VALIDATION_DATASET_ROOT,
         validation_manifest_path,
         classes=classes,
+        force=force,
     )
     write_manifest(
         TEST_DATASET_ROOT,
         test_manifest_path,
         classes=classes,
+        force=force,
     )
     records = read_manifest(train_manifest_path, dataset_root=TRAIN_DATASET_ROOT)
     validation_records = read_manifest(
@@ -73,7 +77,7 @@ def main() -> None:
         test_records=test_records,
         image_size=image_size,
         misclassified_dir=misclassified_dir,
-        force=False,
+        force=force,
     )
 
 
