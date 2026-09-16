@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Collection
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -182,22 +183,27 @@ def _write_misclassified(
     vocabulary: list[str],
     *,
     image_size: tuple[int, int],
-    threshold: float,
+    thresholds: Collection[float],
     output_dir: Path,
     batch_size: int = 32,
     workers: int = 4,
 ) -> None:
-    """Copy images whose predicted label set does not match ground truth."""
+    """Copy misclassified images for each threshold using one prediction pass."""
     if not records:
         return
 
-    report_path = output_dir / "classification-results.csv"
-    if report_path.exists():
-        logging.info("Classification results already exist at %s", report_path)
+    pending_reports = [
+        (threshold, output_dir / f"threshold-{threshold:g}")
+        for threshold in thresholds
+        if not (
+            output_dir / f"threshold-{threshold:g}" / "classification-results.csv"
+        ).exists()
+    ]
+    if not pending_reports:
+        logging.info("Classification results already exist under %s", output_dir)
         return
 
     logging.info("Writing misclassified images to %s", output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     keras = _keras()
     image_sequence_class = _make_image_sequence_class(keras)
     dataset_kwargs: dict[str, Any] = (
@@ -211,6 +217,27 @@ def _write_misclassified(
         verbose=0,
         callbacks=[_prediction_progress_callback(keras, len(records), batch_size)],
     )
+    for threshold, report_dir in pending_reports:
+        _write_misclassification_report(
+            records,
+            vocabulary,
+            probabilities,
+            threshold=threshold,
+            output_dir=report_dir,
+        )
+
+
+def _write_misclassification_report(
+    records: list[ImageRecord],
+    vocabulary: list[str],
+    probabilities: Any,
+    *,
+    threshold: float,
+    output_dir: Path,
+) -> None:
+    """Write one threshold-specific misclassification report."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "classification-results.csv"
     probability_columns = [f"{label}_probability" for label in vocabulary]
     correctly_classified_count = 0
     label_statistics = {
@@ -332,28 +359,28 @@ def _write_misclassified(
     )
 
 
-def build_model(
+def _compile_model(keras: Any, model: Any, learning_rate: float | None = None) -> None:
+    """Compile a classifier model with the configured optimizer and metrics."""
+    optimizer_kwargs = {"learning_rate": learning_rate} if learning_rate else {}
+    model.compile(
+        optimizer=keras.optimizers.Adam(**optimizer_kwargs),
+        loss=keras.losses.BinaryFocalCrossentropy(),
+        metrics=[
+            keras.metrics.BinaryAccuracy(name="binary_accuracy"),
+            keras.metrics.Precision(name="precision"),
+            keras.metrics.Recall(name="recall"),
+        ],
+    )
+
+
+def _build_model(
     class_count: int,
     image_size: tuple[int, int] = (224, 224),
     backbone: str = "EfficientNetV2B0",
     weights: str | None = "imagenet",
     augment: bool = True,
-) -> Any:
-    """Build a frozen Keras Applications backbone with a sigmoid head.
-
-    Args:
-        class_count: Number of output labels.
-        image_size: Height and width expected by the model.
-        backbone: Name of the Keras Applications backbone to use.
-        weights: Backbone weights, typically ``"imagenet"`` or ``None``.
-        augment: Whether to include random training-time augmentation layers.
-
-    Returns:
-        A compiled Keras multilabel classification model.
-
-    Raises:
-        ValueError: If ``backbone`` is not available in Keras Applications.
-    """
+) -> tuple[Any, Any]:
+    """Build a compiled classifier and its initially frozen feature extractor."""
     keras = _keras()
     try:
         backbone_factory = getattr(keras.applications, backbone)
@@ -383,15 +410,33 @@ def build_model(
     features = feature_extractor(augmented_inputs, training=False)
     outputs = keras.layers.Dense(class_count, activation="sigmoid")(features)
     model = keras.Model(inputs, outputs)
-    model.compile(
-        optimizer=keras.optimizers.Adam(),
-        loss=keras.losses.BinaryCrossentropy(),
-        metrics=[
-            keras.metrics.BinaryAccuracy(name="binary_accuracy"),
-            keras.metrics.Precision(name="precision"),
-            keras.metrics.Recall(name="recall"),
-        ],
-    )
+    _compile_model(keras, model)
+    return model, feature_extractor
+
+
+def build_model(
+    class_count: int,
+    image_size: tuple[int, int] = (224, 224),
+    backbone: str = "EfficientNetV2B0",
+    weights: str | None = "imagenet",
+    augment: bool = True,
+) -> Any:
+    """Build a frozen Keras Applications backbone with a sigmoid head.
+
+    Args:
+        class_count: Number of output labels.
+        image_size: Height and width expected by the model.
+        backbone: Name of the Keras Applications backbone to use.
+        weights: Backbone weights, typically ``"imagenet"`` or ``None``.
+        augment: Whether to include random training-time augmentation layers.
+
+    Returns:
+        A compiled Keras multilabel classification model.
+
+    Raises:
+        ValueError: If ``backbone`` is not available in Keras Applications.
+    """
+    model, _ = _build_model(class_count, image_size, backbone, weights, augment)
     return model
 
 
@@ -415,6 +460,20 @@ def _split_training_records(
     )
 
 
+def _log_class_counts(
+    dataset_name: str, records: list[ImageRecord], vocabulary: list[str]
+) -> None:
+    """Log the number of records containing each class and no classes."""
+    counts = {
+        "no classes": sum(not record.labels for record in records),
+        **{
+            label: sum(label in record.labels for record in records)
+            for label in vocabulary
+        },
+    }
+    logging.info("%s dataset example counts: %s", dataset_name, counts)
+
+
 def _fit_model(
     records: list[ImageRecord],
     vocabulary: list[str],
@@ -426,16 +485,19 @@ def _fit_model(
     weights: str | None,
     epochs: int,
     seed: int,
-    threshold: float,
+    frozen_backbone_epochs: int,
     augment: bool,
     class_weighting: bool,
     early_stopping_patience: int,
+    monitor_metric: str,
     batch_size: int,
     workers: int,
 ) -> Any:
     """Fit, checkpoint, and return a model using prepared record splits."""
     logging.info("Starting training")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _log_class_counts("Training", records, vocabulary)
+    _log_class_counts("Validation", validation_records, vocabulary)
 
     keras = _keras()
     keras.utils.set_random_seed(seed)
@@ -447,6 +509,10 @@ def _fit_model(
         [[int(label in record.labels) for label in vocabulary] for record in records]
     )
     class_weights = calculate_class_weights(labels.tolist(), vocabulary)
+    if class_weighting:
+        logging.info("Using class weights: %s", class_weights)
+    else:
+        logging.info("Class weighting is disabled")
     train_labels = np.array(
         [[int(label in record.labels) for label in vocabulary] for record in records]
     )
@@ -479,7 +545,7 @@ def _fit_model(
         shuffle=True,
         **dataset_kwargs,
     )
-    model = build_model(
+    model, feature_extractor = _build_model(
         len(vocabulary),
         image_size=image_size,
         backbone=backbone,
@@ -489,7 +555,11 @@ def _fit_model(
     fit_kwargs: dict[str, Any] = {"epochs": epochs}
     if validation_dataset is not None:
         fit_kwargs["validation_data"] = validation_dataset
-    monitor = "val_loss" if validation_dataset is not None else "loss"
+    monitor = (
+        monitor_metric
+        if validation_dataset is None or monitor_metric.startswith("val_")
+        else f"val_{monitor_metric}"
+    )
     callbacks: list[Any] = [
         keras.callbacks.CSVLogger(output_path.with_suffix(".csv")),
         keras.callbacks.ModelCheckpoint(
@@ -506,7 +576,17 @@ def _fit_model(
         )
     fit_kwargs["callbacks"] = callbacks
 
-    model.fit(train_dataset, **fit_kwargs)
+    frozen_epochs = min(epochs, frozen_backbone_epochs)
+    if frozen_epochs:
+        fit_kwargs["epochs"] = frozen_epochs
+        model.fit(train_dataset, **fit_kwargs)
+    if frozen_epochs < epochs:
+        logging.info("Unfreezing the feature extractor after %d epochs", frozen_epochs)
+        feature_extractor.trainable = True
+        _compile_model(keras, model, learning_rate=1e-4)
+        fit_kwargs["initial_epoch"] = frozen_epochs
+        fit_kwargs["epochs"] = epochs
+        model.fit(train_dataset, **fit_kwargs)
     model = keras.models.load_model(output_path)
     metadata_path = output_path.with_suffix(".json")
     metadata_path.write_text(
@@ -515,7 +595,7 @@ def _fit_model(
                 "labels": vocabulary,
                 "image_size": list(image_size),
                 "backbone": backbone,
-                "threshold": threshold,
+                "threshold": 0.5,
                 "augmentation": augment,
                 "class_weighting": class_weighting,
                 "class_weights": class_weights,
@@ -540,10 +620,12 @@ def train_model(
     epochs: int = 30,
     validation_split: float = 0.0,
     seed: int = 42,
-    threshold: float = 0.5,
+    thresholds: Collection[float] = (0.5,),
+    frozen_backbone_epochs: int = 5,
     augment: bool = True,
     class_weighting: bool = True,
     early_stopping_patience: int = 5,
+    monitor_metric: str = "loss",
     misclassified_dir: Path | None = None,
     batch_size: int = 32,
     workers: int = 4,
@@ -566,11 +648,18 @@ def train_model(
         validation_split: Fraction of training data used for validation when
             explicit validation records are not supplied.
         seed: Random seed used by Keras.
-        threshold: Prediction threshold saved in the model metadata.
+        thresholds: Prediction thresholds used for separate misclassification
+            reports.
+        frozen_backbone_epochs: Number of initial epochs to train only the
+            classification head before fine-tuning the feature extractor.
         augment: Whether to enable random training-time augmentation.
         class_weighting: Whether to apply balanced per-image sample weights.
         early_stopping_patience: Epochs with no monitored improvement before
             training stops early. Set to zero to disable early stopping.
+        monitor_metric: Metric used to select the best checkpoint and to
+            evaluate early stopping, e.g. ``"loss"``, ``"binary_accuracy"``,
+            ``"precision"`` or ``"recall"``. A ``val_`` prefix is added
+            automatically when validation data is available.
         misclassified_dir: Optional directory under which misclassified
             images are copied into ``train_wrong``, ``validation_wrong`` and
             ``test_wrong`` subdirectories.
@@ -591,6 +680,15 @@ def train_model(
     """
     if not records:
         raise ValueError("Cannot train without image records")
+    if frozen_backbone_epochs < 0:
+        raise ValueError("frozen_backbone_epochs must not be negative")
+    thresholds = tuple(thresholds)
+    if not thresholds:
+        raise ValueError("At least one prediction threshold is required")
+    if len(set(thresholds)) != len(thresholds) or not all(
+        0 <= threshold <= 1 for threshold in thresholds
+    ):
+        raise ValueError("Prediction thresholds must be unique values between 0 and 1")
     if (validation_records is not None and validation_split) or (
         validation_records and not validation_split == 0.0
     ):
@@ -617,10 +715,11 @@ def train_model(
             weights=weights,
             epochs=epochs,
             seed=seed,
-            threshold=threshold,
+            frozen_backbone_epochs=frozen_backbone_epochs,
             augment=augment,
             class_weighting=class_weighting,
             early_stopping_patience=early_stopping_patience,
+            monitor_metric=monitor_metric,
             batch_size=batch_size,
             workers=workers,
         )
@@ -631,7 +730,7 @@ def train_model(
             records,
             vocabulary,
             image_size=image_size,
-            threshold=threshold,
+            thresholds=thresholds,
             output_dir=misclassified_dir / "train_wrong",
             batch_size=batch_size,
             workers=workers,
@@ -641,7 +740,7 @@ def train_model(
             validation_records_for_reporting,
             vocabulary,
             image_size=image_size,
-            threshold=threshold,
+            thresholds=thresholds,
             output_dir=misclassified_dir / "validation_wrong",
             batch_size=batch_size,
             workers=workers,
@@ -651,7 +750,7 @@ def train_model(
             test_records or [],
             vocabulary,
             image_size=image_size,
-            threshold=threshold,
+            thresholds=thresholds,
             output_dir=misclassified_dir / "test_wrong",
             batch_size=batch_size,
             workers=workers,

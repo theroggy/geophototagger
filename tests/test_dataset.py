@@ -132,6 +132,25 @@ def test_class_weights_balance_positive_and_negative_examples() -> None:
     assert weights["rare"] == {"positive": 2.0, "negative": 0.6666666666666666}
 
 
+def test_log_class_counts_includes_each_class_and_unlabeled_records(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    classifier._log_class_counts(
+        "Training",
+        [
+            ImageRecord(tmp_path / "one.jpg", ("maize",)),
+            ImageRecord(tmp_path / "two.jpg", ("maize", "manure")),
+            ImageRecord(tmp_path / "three.jpg", ()),
+        ],
+        ["maize", "manure"],
+    )
+
+    assert (
+        "Training dataset example counts: {'no classes': 1, 'maize': 2, 'manure': 1}"
+        in caplog.text
+    )
+
+
 def test_prediction_progress_logs_once_per_minute_and_on_completion(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -173,10 +192,14 @@ def test_misclassification_report_includes_correct_and_incorrect_records(
         def __init__(self, records, *_args, **_kwargs) -> None:
             self.records = records
 
+    prediction_calls = 0
+
     class FakeModel:
         def predict(
             self, _dataset, verbose: int, callbacks: list[SimpleNamespace]
         ) -> list[list[float]]:
+            nonlocal prediction_calls
+            prediction_calls += 1
             assert verbose == 0
             callbacks[0].on_predict_batch_end(0)
             return [[0.9, 0.1], [0.8, 0.2]]
@@ -203,12 +226,13 @@ def test_misclassification_report_includes_correct_and_incorrect_records(
         ],
         ["maize", "manure"],
         image_size=(224, 224),
-        threshold=0.5,
+        thresholds=(0.5, 0.7),
         output_dir=output_dir,
         workers=0,
     )
 
-    with (output_dir / "classification-results.csv").open(
+    report_dir = output_dir / "threshold-0.5"
+    with (report_dir / "classification-results.csv").open(
         encoding="utf-8", newline=""
     ) as report_file:
         rows = list(csv.DictReader(report_file))
@@ -231,12 +255,14 @@ def test_misclassification_report_includes_correct_and_incorrect_records(
             "manure_probability": "0.2",
         },
     ]
-    assert not (output_dir / "first.jpg").exists()
-    assert (output_dir / "second.jpg").exists()
-    assert (output_dir / "second.json").exists()
+    assert not (report_dir / "first.jpg").exists()
+    assert (report_dir / "second.jpg").exists()
+    assert (report_dir / "second.json").exists()
+    assert prediction_calls == 1
+    assert (output_dir / "threshold-0.7" / "classification-statistics.json").exists()
     assert "Prediction progress: 2/2 files (100%)" in caplog.text
     statistics = json.loads(
-        (output_dir / "classification-statistics.json").read_text(encoding="utf-8")
+        (report_dir / "classification-statistics.json").read_text(encoding="utf-8")
     )
     assert statistics["total_files"] == 2
     assert statistics["correctly_classified_files"] == 1
@@ -279,7 +305,12 @@ def test_existing_model_skips_training_and_still_writes_reports(
         classifier,
         "_write_misclassified",
         lambda reported_model, reported_records, *_args, **kwargs: reports.append(
-            (reported_model, reported_records, kwargs["output_dir"].name)
+            (
+                reported_model,
+                reported_records,
+                kwargs["output_dir"].relative_to(tmp_path / "reports").as_posix(),
+                kwargs["thresholds"],
+            )
         ),
     )
 
@@ -290,11 +321,12 @@ def test_existing_model_skips_training_and_still_writes_reports(
         validation_records=[validation_record],
         test_records=[test_record],
         misclassified_dir=tmp_path / "reports",
+        thresholds=(0.5, 0.7),
     )
 
     assert returned_model is model
     assert reports == [
-        (model, [training_record], "train_wrong"),
-        (model, [validation_record], "validation_wrong"),
-        (model, [test_record], "test_wrong"),
+        (model, [training_record], "train_wrong", (0.5, 0.7)),
+        (model, [validation_record], "validation_wrong", (0.5, 0.7)),
+        (model, [test_record], "test_wrong", (0.5, 0.7)),
     ]

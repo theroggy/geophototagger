@@ -43,6 +43,8 @@ def main() -> None:
     misclassified_dir.mkdir(parents=True, exist_ok=True)
     classes = {"korrelmais"}
     image_size = (1024, 1024)
+    thresholds = (0.5, 0.6, 0.7, 0.8)
+    frozen_backbone_epochs = 5
     force = False
 
     logging.info("Writing training manifests.")
@@ -76,6 +78,9 @@ def main() -> None:
         validation_records=validation_records,
         test_records=test_records,
         image_size=image_size,
+        thresholds=thresholds,
+        frozen_backbone_epochs=frozen_backbone_epochs,
+        monitor_metric="precision",
         misclassified_dir=misclassified_dir,
         force=force,
     )
