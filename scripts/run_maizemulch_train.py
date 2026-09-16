@@ -13,9 +13,6 @@ from geophototagger.custom.dataset import (
 
 def main() -> None:
     """Generate train/validation/test manifests and train the configured model."""
-    logging.basicConfig(level=logging.INFO)
-
-    logging.info("Starting the training run.")
     # Edit these values for the training run you want to execute.
     TRAIN_DATASET_ROOT = Path(r"X:\Monitoring\geophototagger\trainingsdata\train")
     VALIDATION_DATASET_ROOT = Path(
@@ -31,6 +28,16 @@ def main() -> None:
     training_dir.mkdir(parents=True, exist_ok=True)
     train_manifest_path = training_dir / "train-images.csv"
     validation_manifest_path = training_dir / "validation-images.csv"
+
+    # Init logging
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(training_dir / "train.log"),
+        ],
+    )
+    logging.info("Starting the training run.")
 
     test_dir = project_dir / "test" / version
     test_dir.mkdir(parents=True, exist_ok=True)

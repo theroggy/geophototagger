@@ -373,6 +373,20 @@ def _compile_model(keras: Any, model: Any, learning_rate: float | None = None) -
     )
 
 
+def _make_csv_logger(keras: Any, path: Path, *, append: bool) -> Any:
+    """Build a CSVLogger that reopens its file with newline="" to avoid blank rows."""
+
+    class _CSVLogger(keras.callbacks.CSVLogger):
+        def on_train_begin(self, logs: dict[str, Any] | None = None) -> None:
+            super().on_train_begin(logs)
+            self.csv_file.close()
+            self.csv_file = open(  # noqa: SIM115
+                self.filename, "a" if self.append else "w", newline=""
+            )
+
+    return _CSVLogger(path, append=append)
+
+
 def _build_model(
     class_count: int,
     image_size: tuple[int, int] = (224, 224),
@@ -496,6 +510,7 @@ def _fit_model(
     """Fit, checkpoint, and return a model using prepared record splits."""
     logging.info("Starting training")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.with_suffix(".csv").unlink(missing_ok=True)
     _log_class_counts("Training", records, vocabulary)
     _log_class_counts("Validation", validation_records, vocabulary)
 
@@ -561,7 +576,7 @@ def _fit_model(
         else f"val_{monitor_metric}"
     )
     callbacks: list[Any] = [
-        keras.callbacks.CSVLogger(output_path.with_suffix(".csv")),
+        _make_csv_logger(keras, output_path.with_suffix(".csv"), append=True),
         keras.callbacks.ModelCheckpoint(
             output_path, monitor=monitor, save_best_only=True
         ),
@@ -572,6 +587,7 @@ def _fit_model(
                 monitor=monitor,
                 patience=early_stopping_patience,
                 restore_best_weights=True,
+                verbose=1,
             )
         )
     fit_kwargs["callbacks"] = callbacks
@@ -624,7 +640,7 @@ def train_model(
     frozen_backbone_epochs: int = 5,
     augment: bool = True,
     class_weighting: bool = True,
-    early_stopping_patience: int = 5,
+    early_stopping_patience: int = 10,
     monitor_metric: str = "loss",
     misclassified_dir: Path | None = None,
     batch_size: int = 32,
