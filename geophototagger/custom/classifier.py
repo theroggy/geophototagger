@@ -7,13 +7,12 @@ import json
 import logging
 import os
 import shutil
-import time
 from collections.abc import Collection
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from .dataset import ImageRecord
 
@@ -147,34 +146,23 @@ def _sample_weights(
 def _prediction_progress_callback(
     keras: Any, record_count: int, batch_size: int
 ) -> Any:
-    """Create a callback that logs prediction progress at most once a minute."""
-    batch_count = -(-record_count // batch_size)
-    logging.info("Predicting %d files in %d batches", record_count, batch_count)
-    started_at = time.monotonic()
-    last_log_time = started_at
+    """Create a callback that displays prediction progress with tqdm."""
+    progress = tqdm(total=record_count, desc="Predicting", unit="image")
+    logging.info("Predicting %d files", record_count)
 
-    def log_progress(batch: int, logs: dict[str, Any] | None = None) -> None:
+    def update_progress(batch: int, logs: dict[str, Any] | None = None) -> None:
+        del batch
         del logs
-        nonlocal last_log_time
-        completed_batches = batch + 1
-        current_time = time.monotonic()
-        if completed_batches != batch_count and current_time - last_log_time < 60:
-            return
-        completed_files = min(completed_batches * batch_size, record_count)
-        elapsed_seconds = current_time - started_at
-        remaining_seconds = round(
-            elapsed_seconds * (batch_count - completed_batches) / completed_batches
-        )
-        logging.info(
-            "Prediction progress: %d/%d files (%d%%); estimated %s remaining",
-            completed_files,
-            record_count,
-            100 * completed_files // record_count,
-            timedelta(seconds=remaining_seconds),
-        )
-        last_log_time = current_time
+        progress.update(min(batch_size, record_count - progress.n))
 
-    return keras.callbacks.LambdaCallback(on_predict_batch_end=log_progress)
+    def close_progress(logs: dict[str, Any] | None = None) -> None:
+        del logs
+        progress.close()
+
+    return keras.callbacks.LambdaCallback(
+        on_predict_batch_end=update_progress,
+        on_predict_end=close_progress,
+    )
 
 
 def _write_misclassified(

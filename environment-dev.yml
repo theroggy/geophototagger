@@ -8,6 +8,7 @@ dependencies:
   - keras
   - pytorch
   - pillow
+  - tqdm
   # testing
   - pytest
   - pytest-cov

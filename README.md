@@ -71,8 +71,8 @@ least the threshold stored beside the model:
 
 ```powershell
 python -m geophototagger.predict `
-	X:\Monitoring\geophototagger\geophototagger.keras `
-	X:\Monitoring\geophototagger\new-image.jpg
+	X:\Monitoring\phototagger\geophototagger.keras `
+	X:\Monitoring\phototagger\new-image.jpg
 ```
 
 The model output uses a sigmoid probability for every label, allowing one
