@@ -14,15 +14,15 @@ from geophototagger.custom.dataset import (
 def main() -> None:
     """Generate train/validation/test manifests and train the configured model."""
     # Edit these values for the training run you want to execute.
-    TRAIN_DATASET_ROOT = Path(r"X:\Monitoring\geophototagger\trainingsdata\train")
+    TRAIN_DATASET_ROOT = Path(r"X:\Monitoring\phototagger\trainingsdata\train")
     VALIDATION_DATASET_ROOT = Path(
-        r"X:\Monitoring\geophototagger\trainingsdata\validation"
+        r"X:\Monitoring\phototagger\trainingsdata\validation"
     )
-    TEST_DATASET_ROOT = Path(r"X:\Monitoring\geophototagger\trainingsdata\test")
+    TEST_DATASET_ROOT = Path(r"X:\Monitoring\phototagger\trainingsdata\test")
 
     project = "maizemulch"
-    version = "01.large"
-    project_dir = Path(f"X:/Monitoring/geophototagger/{project}")
+    version = "02.large"
+    project_dir = Path(f"X:/Monitoring/phototagger/{project}")
     project_dir.mkdir(parents=True, exist_ok=True)
     training_dir = project_dir / "training" / version
     training_dir.mkdir(parents=True, exist_ok=True)
@@ -46,8 +46,8 @@ def main() -> None:
     model_dir = project_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     model_path = model_dir / f"geophototagger-{project}_{version}.keras"
-    misclassified_dir = training_dir / "misclassified"
-    misclassified_dir.mkdir(parents=True, exist_ok=True)
+    evaluation_dir = training_dir / "evaluation"
+    evaluation_dir.mkdir(parents=True, exist_ok=True)
     classes = {"korrelmais"}
     image_size = (1024, 1024)
     thresholds = (0.5, 0.6, 0.7, 0.8)
@@ -88,7 +88,7 @@ def main() -> None:
         thresholds=thresholds,
         frozen_backbone_epochs=frozen_backbone_epochs,
         monitor_metric="precision",
-        misclassified_dir=misclassified_dir,
+        evaluation_dir=evaluation_dir,
         force=force,
     )
 

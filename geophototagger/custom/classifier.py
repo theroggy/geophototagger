@@ -8,6 +8,8 @@ import logging
 import os
 import shutil
 from collections.abc import Collection
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -165,69 +167,16 @@ def _prediction_progress_callback(
     )
 
 
-def _write_misclassified(
-    model: Any,
+def _write_prediction_report(
     records: list[ImageRecord],
     vocabulary: list[str],
-    *,
-    image_size: tuple[int, int],
-    thresholds: Collection[float],
-    output_dir: Path,
-    batch_size: int = 32,
-    workers: int = 4,
-) -> None:
-    """Copy misclassified images for each threshold using one prediction pass."""
-    if not records:
-        return
-
-    pending_reports = [
-        (threshold, output_dir / f"threshold-{threshold:g}")
-        for threshold in thresholds
-        if not (
-            output_dir / f"threshold-{threshold:g}" / "classification-results.csv"
-        ).exists()
-    ]
-    if not pending_reports:
-        logging.info("Classification results already exist under %s", output_dir)
-        return
-
-    logging.info("Writing misclassified images to %s", output_dir)
-    keras = _keras()
-    image_sequence_class = _make_image_sequence_class(keras)
-    dataset_kwargs: dict[str, Any] = (
-        {"workers": workers, "use_multiprocessing": False} if workers else {}
-    )
-    dataset = image_sequence_class(
-        records, image_size, batch_size=batch_size, **dataset_kwargs
-    )
-    probabilities = model.predict(
-        dataset,
-        verbose=0,
-        callbacks=[_prediction_progress_callback(keras, len(records), batch_size)],
-    )
-    for threshold, report_dir in pending_reports:
-        _write_misclassification_report(
-            records,
-            vocabulary,
-            probabilities,
-            threshold=threshold,
-            output_dir=report_dir,
-        )
-
-
-def _write_misclassification_report(
-    records: list[ImageRecord],
-    vocabulary: list[str],
-    probabilities: Any,
+    predictions_by_path: dict[str, dict[str, float]],
     *,
     threshold: float,
     output_dir: Path,
 ) -> None:
-    """Write one threshold-specific misclassification report."""
+    """Write a complete report for one classification threshold."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / "classification-results.csv"
-    probability_columns = [f"{label}_probability" for label in vocabulary]
-    correctly_classified_count = 0
     label_statistics = {
         label: {
             "true_positives": 0,
@@ -237,6 +186,8 @@ def _write_misclassification_report(
         }
         for label in vocabulary
     }
+    correctly_classified_count = 0
+    report_path = output_dir / "prediction-results.csv"
     with report_path.open("w", encoding="utf-8", newline="") as report_file:
         writer = csv.DictWriter(
             report_file,
@@ -245,18 +196,13 @@ def _write_misclassification_report(
                 "expected_labels",
                 "predicted_labels",
                 "correctly_classified",
-                *probability_columns,
+                *(f"{label}_probability" for label in vocabulary),
             ],
         )
         writer.writeheader()
-        for record, probability_row in zip(records, probabilities, strict=True):
-            predicted_probabilities = dict(
-                zip(
-                    vocabulary,
-                    (float(value) for value in probability_row),
-                    strict=True,
-                )
-            )
+        for record in records:
+            path_key = str(record.image_path.resolve())
+            predicted_probabilities = predictions_by_path[path_key]
             predicted_labels = {
                 label
                 for label, probability in predicted_probabilities.items()
@@ -264,17 +210,17 @@ def _write_misclassification_report(
             }
             correctly_classified = predicted_labels == set(record.labels)
             correctly_classified_count += correctly_classified
-            for label in vocabulary:
+            for label, counts in label_statistics.items():
                 expected = label in record.labels
                 predicted = label in predicted_labels
                 if expected and predicted:
-                    label_statistics[label]["true_positives"] += 1
+                    counts["true_positives"] += 1
                 elif predicted:
-                    label_statistics[label]["false_positives"] += 1
+                    counts["false_positives"] += 1
                 elif expected:
-                    label_statistics[label]["false_negatives"] += 1
+                    counts["false_negatives"] += 1
                 else:
-                    label_statistics[label]["true_negatives"] += 1
+                    counts["true_negatives"] += 1
             writer.writerow(
                 {
                     "image_path": str(record.image_path),
@@ -289,10 +235,7 @@ def _write_misclassification_report(
             )
             if not correctly_classified:
                 shutil.copy2(record.image_path, output_dir / record.image_path.name)
-                misclassified_report_path = (
-                    output_dir / f"{record.image_path.stem}.json"
-                )
-                misclassified_report_path.write_text(
+                (output_dir / f"{record.image_path.stem}.json").write_text(
                     json.dumps(
                         {
                             "image": str(record.image_path),
@@ -304,7 +247,9 @@ def _write_misclassification_report(
                     ),
                     encoding="utf-8",
                 )
+
     label_metrics = {}
+    record_count = len(records)
     for label, counts in label_statistics.items():
         precision_denominator = counts["true_positives"] + counts["false_positives"]
         recall_denominator = counts["true_positives"] + counts["false_negatives"]
@@ -319,26 +264,25 @@ def _write_misclassification_report(
         label_metrics[label] = {
             **counts,
             "accuracy": (counts["true_positives"] + counts["true_negatives"])
-            / len(records),
+            / record_count,
             "precision": precision,
             "recall": recall,
             "f1_score": 2 * precision * recall / (precision + recall)
             if precision + recall
             else 0.0,
         }
-    misclassified_count = len(records) - correctly_classified_count
-    statistics_path = output_dir / "classification-statistics.json"
-    statistics_path.write_text(
+    misclassified_count = record_count - correctly_classified_count
+    (output_dir / "prediction-statistics.json").write_text(
         json.dumps(
             {
                 "classification_threshold": threshold,
-                "total_files": len(records),
+                "total_files": record_count,
                 "correctly_classified_files": correctly_classified_count,
                 "correctly_classified_percentage": 100
                 * correctly_classified_count
-                / len(records),
+                / record_count,
                 "misclassified_files": misclassified_count,
-                "misclassified_percentage": 100 * misclassified_count / len(records),
+                "misclassified_percentage": 100 * misclassified_count / record_count,
                 "per_label": label_metrics,
             },
             indent=2,
@@ -495,8 +439,29 @@ def _fit_model(
     batch_size: int,
     workers: int,
 ) -> Any:
-    """Fit, checkpoint, and return a model using prepared record splits."""
-    logging.info("Starting training")
+    """Fit, checkpoint, and return a model using prepared record splits.
+
+    Args:
+        records: Training image records.
+        vocabulary: Ordered labels used by the model output.
+        output_path: Destination for the saved Keras model.
+        validation_records: Records used only for validation.
+        image_size: Height and width used when loading images.
+        backbone: Keras Applications backbone name.
+        weights: Initial backbone weights, or ``None``.
+        epochs: Total training epochs.
+        seed: Random seed used by Keras.
+        frozen_backbone_epochs: Initial epochs with a frozen backbone.
+        augment: Whether to enable training-time image augmentation.
+        class_weighting: Whether to apply balanced per-image weights.
+        early_stopping_patience: Epochs without improvement before stopping.
+        monitor_metric: Metric used to select checkpoints and stop training.
+        batch_size: Images per training batch.
+        workers: Background image-loading threads; zero loads synchronously.
+
+    Returns:
+        The best checkpointed Keras model.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.with_suffix(".csv").unlink(missing_ok=True)
     _log_class_counts("Training", records, vocabulary)
@@ -630,7 +595,7 @@ def train_model(
     class_weighting: bool = True,
     early_stopping_patience: int = 10,
     monitor_metric: str = "loss",
-    misclassified_dir: Path | None = None,
+    evaluation_dir: Path | None = None,
     batch_size: int = 32,
     workers: int = 4,
     force: bool = False,
@@ -664,9 +629,10 @@ def train_model(
             evaluate early stopping, e.g. ``"loss"``, ``"binary_accuracy"``,
             ``"precision"`` or ``"recall"``. A ``val_`` prefix is added
             automatically when validation data is available.
-        misclassified_dir: Optional directory under which misclassified
-            images are copied into ``train_wrong``, ``validation_wrong`` and
-            ``test_wrong`` subdirectories.
+        evaluation_dir: Optional directory where evaluation information is written.
+            Misclassified images are copied into ``train_wrong``, ``validation_wrong``
+            and ``test_wrong`` subdirectories. Each split directory contains its
+            ``predictions.csv`` and threshold-specific report directories.
         batch_size: Number of images loaded into memory per training or
             prediction batch.
         workers: Number of background threads used to load image batches
@@ -728,86 +694,275 @@ def train_model(
             workers=workers,
         )
 
-    if misclassified_dir is not None:
-        _write_misclassified(
-            model,
-            records,
-            vocabulary,
-            image_size=image_size,
-            thresholds=thresholds,
-            output_dir=misclassified_dir / "train_wrong",
-            batch_size=batch_size,
-            workers=workers,
-        )
-        _write_misclassified(
-            model,
-            validation_records_for_reporting,
-            vocabulary,
-            image_size=image_size,
-            thresholds=thresholds,
-            output_dir=misclassified_dir / "validation_wrong",
-            batch_size=batch_size,
-            workers=workers,
-        )
-        _write_misclassified(
-            model,
-            test_records or [],
-            vocabulary,
-            image_size=image_size,
-            thresholds=thresholds,
-            output_dir=misclassified_dir / "test_wrong",
-            batch_size=batch_size,
-            workers=workers,
-        )
+    if evaluation_dir is not None:
+        for split_name, split_records in (
+            ("train", records),
+            ("validation", validation_records_for_reporting),
+            ("test", test_records or []),
+        ):
+            if not split_records:
+                continue
+            predict_images(
+                output_path,
+                split_records,
+                batch_size=batch_size,
+                workers=workers,
+                output_dir=evaluation_dir / f"{split_name}_wrong",
+                thresholds=thresholds,
+            )
     return model
+
+
+def _read_prediction_cache(
+    output_path: Path, labels: list[str]
+) -> dict[str, dict[str, float]]:
+    """Read and validate cached predictions from a label-specific CSV file."""
+    fieldnames = ["image_path", *(f"{label}_probability" for label in labels)]
+    cached_predictions: dict[str, dict[str, float]] = {}
+    with output_path.open(encoding="utf-8", newline="") as output_file:
+        reader = csv.DictReader(output_file)
+        if reader.fieldnames != fieldnames:
+            raise ValueError(
+                f"Prediction CSV must have columns in this order: {fieldnames}"
+            )
+        for row_number, row in enumerate(reader, start=2):
+            if None in row or any(
+                row.get(fieldname) is None for fieldname in fieldnames
+            ):
+                raise ValueError(f"Malformed prediction CSV row {row_number}")
+            raw_image_path = row["image_path"]
+            if not raw_image_path.strip():
+                raise ValueError(
+                    f"Prediction CSV row {row_number} has an empty image path"
+                )
+            image_key = str(Path(raw_image_path).resolve())
+            if image_key in cached_predictions:
+                raise ValueError(
+                    f"Prediction CSV contains a duplicate image path: {raw_image_path}"
+                )
+            predictions: dict[str, float] = {}
+            for label in labels:
+                try:
+                    probability = float(row[f"{label}_probability"])
+                except ValueError as error:
+                    raise ValueError(
+                        f"Invalid probability on prediction CSV row {row_number}"
+                    ) from error
+                if not np.isfinite(probability) or not 0 <= probability <= 1:
+                    raise ValueError(
+                        f"Invalid probability on prediction CSV row {row_number}"
+                    )
+                predictions[label] = probability
+            cached_predictions[image_key] = predictions
+    return cached_predictions
+
+
+def _iter_prediction_batches(dataset: Any, workers: int) -> Any:
+    """Yield ordered image batches, prefetching with background threads."""
+    batch_count = len(dataset)
+    if not workers:
+        for batch_index in range(batch_count):
+            yield dataset[batch_index]
+        return
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        next_batch = min(workers, batch_count)
+        futures = {
+            batch_index: executor.submit(dataset.__getitem__, batch_index)
+            for batch_index in range(next_batch)
+        }
+        for batch_index in range(batch_count):
+            yield futures.pop(batch_index).result()
+            if next_batch < batch_count:
+                futures[next_batch] = executor.submit(dataset.__getitem__, next_batch)
+                next_batch += 1
 
 
 def predict_images(
     model_path: Path,
-    image_paths: list[Path],
+    image_paths: list[Path] | list[ImageRecord],
     batch_size: int = 32,
     workers: int = 4,
+    output_dir: Path | None = None,
+    *,
+    thresholds: Collection[float] = (0.5,),
 ) -> list[dict[str, float]]:
-    """Predict label probabilities for a list of images.
+    """Predict batches, saving results and reports under one output directory.
 
     Args:
         model_path: Saved Keras model path with adjacent JSON metadata.
-        image_paths: Images to classify.
-        batch_size: Number of images loaded into memory per prediction batch.
-        workers: Number of background threads used to load image batches
-            ahead of time while predicting. Set to zero to load synchronously
-            on the main thread.
+        image_paths: Image paths or labeled ``ImageRecord`` values to classify.
+        batch_size: Number of images loaded and predicted per batch.
+        workers: Number of background threads used to load batches ahead of
+            prediction. Set to zero to load synchronously.
+        output_dir: Optional destination for ``predictions.csv`` and the
+            threshold-specific report directories. Existing rows are reused by
+            resolved image path.
+        thresholds: Unique probability thresholds in [0, 1] for reports. Used
+            when labeled records and ``output_dir`` are provided.
 
     Returns:
-        One label-to-probability mapping per image, in ``image_paths`` order.
+        One label-to-probability mapping per input image, in input order.
+
+    Raises:
+        ValueError: If the prediction CSV is malformed, input paths and records
+            are mixed while reports are requested, or thresholds are invalid.
     """
     metadata = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
     image_size = tuple(metadata["image_size"])
+    labels = metadata["labels"]
+    input_is_record = [
+        isinstance(image_path, ImageRecord) for image_path in image_paths
+    ]
+    if output_dir is not None and any(input_is_record) and not all(input_is_record):
+        raise ValueError("Use either ImageRecord values or image paths, not both")
+    write_reports = (
+        bool(image_paths) and all(input_is_record) and output_dir is not None
+    )
+    if write_reports and (
+        not thresholds
+        or len(set(thresholds)) != len(thresholds)
+        or not all(0 <= threshold <= 1 for threshold in thresholds)
+    ):
+        raise ValueError("Thresholds must be unique values between 0 and 1")
+    records = [
+        image_path
+        if isinstance(image_path, ImageRecord)
+        else ImageRecord(image_path, ())
+        for image_path in image_paths
+    ]
+    prediction_path = output_dir / "predictions.csv" if output_dir is not None else None
+    cached_predictions = (
+        _read_prediction_cache(prediction_path, labels)
+        if prediction_path is not None and prediction_path.exists()
+        else {}
+    )
+    input_keys = [str(record.image_path.resolve()) for record in records]
+    pending_records = []
+    pending_keys = []
+    seen_keys = set(cached_predictions)
+    for record, image_key in zip(records, input_keys, strict=True):
+        if image_key not in seen_keys:
+            pending_records.append(record)
+            pending_keys.append(image_key)
+            seen_keys.add(image_key)
+
+    fieldnames = ["image_path", *(f"{label}_probability" for label in labels)]
+    if prediction_path is not None and not prediction_path.exists():
+        prediction_path.parent.mkdir(parents=True, exist_ok=True)
+        with prediction_path.open("w", encoding="utf-8", newline="") as output_file:
+            csv.DictWriter(output_file, fieldnames=fieldnames).writeheader()
+    if not pending_records:
+        predictions = [dict(cached_predictions[key]) for key in input_keys]
+        if write_reports and output_dir is not None and records:
+            _write_prediction_reports(
+                records, labels, cached_predictions, output_dir, thresholds
+            )
+        return predictions
+
     keras = _keras()
     model = keras.models.load_model(model_path)
-    records = [ImageRecord(image_path, ()) for image_path in image_paths]
     image_sequence_class = _make_image_sequence_class(keras)
-    dataset_kwargs: dict[str, Any] = (
-        {"workers": workers, "use_multiprocessing": False} if workers else {}
+    dataset = image_sequence_class(pending_records, image_size, batch_size=batch_size)
+    output_context = (
+        prediction_path.open("a", encoding="utf-8", newline="")
+        if prediction_path is not None
+        else nullcontext(None)
     )
-    dataset = image_sequence_class(
-        records, image_size, batch_size=batch_size, **dataset_kwargs
-    )
-    probabilities = model.predict(
-        dataset,
-        verbose=0,
-        callbacks=[_prediction_progress_callback(keras, len(image_paths), batch_size)],
-    )
-    return [
-        dict(
-            zip(
-                metadata["labels"],
-                (float(value) for value in probability_row),
-                strict=True,
-            )
+    with output_context as output_file:
+        writer = (
+            csv.DictWriter(output_file, fieldnames=fieldnames)
+            if output_file is not None
+            else None
         )
-        for probability_row in probabilities
-    ]
+        with tqdm(
+            total=len(pending_records), desc="Predicting", unit="image"
+        ) as progress:
+            for batch_index, batch_images in enumerate(
+                _iter_prediction_batches(dataset, workers)
+            ):
+                batch_start = batch_index * batch_size
+                batch_keys = pending_keys[batch_start : batch_start + batch_size]
+                batch_count = len(batch_keys)
+                batch_predictions = np.asarray(model.predict_on_batch(batch_images))
+                expected_shape = (batch_count, len(labels))
+                if batch_predictions.shape != expected_shape:
+                    raise ValueError(
+                        "Model returned prediction shape "
+                        f"{batch_predictions.shape}, expected {expected_shape}"
+                    )
+                rows = []
+                for image_key, probability_row in zip(
+                    batch_keys, batch_predictions, strict=True
+                ):
+                    predictions = dict(
+                        zip(
+                            labels,
+                            (float(value) for value in probability_row),
+                            strict=True,
+                        )
+                    )
+                    cached_predictions[image_key] = predictions
+                    rows.append(
+                        {
+                            "image_path": image_key,
+                            **{
+                                f"{label}_probability": predictions[label]
+                                for label in labels
+                            },
+                        }
+                    )
+                if writer is not None and output_file is not None:
+                    writer.writerows(rows)
+                    output_file.flush()
+                progress.update(batch_count)
+    predictions = [dict(cached_predictions[key]) for key in input_keys]
+    if write_reports and output_dir is not None and records:
+        _write_prediction_reports(
+            records, labels, cached_predictions, output_dir, thresholds
+        )
+    return predictions
+
+
+def _write_prediction_reports(
+    records: list[ImageRecord],
+    vocabulary: list[str],
+    predictions_by_path: dict[str, dict[str, float]],
+    output_dir: Path,
+    thresholds: Collection[float] = (0.5,),
+) -> None:
+    """Write any missing reports using probabilities already in memory."""
+    if not records:
+        return
+    if (
+        not thresholds
+        or len(set(thresholds)) != len(thresholds)
+        or not all(0 <= threshold <= 1 for threshold in thresholds)
+    ):
+        raise ValueError("Thresholds must be unique values between 0 and 1")
+    for record in records:
+        path_key = str(record.image_path.resolve())
+        if path_key not in predictions_by_path:
+            raise ValueError(f"Prediction missing for image: {record.image_path}")
+        unknown_labels = set(record.labels) - set(vocabulary)
+        if unknown_labels:
+            raise ValueError(
+                f"Image labels missing from vocabulary: {sorted(unknown_labels)}"
+            )
+
+    for threshold in thresholds:
+        report_dir = output_dir / f"threshold-{threshold:g}"
+        report_path = report_dir / "prediction-results.csv"
+        statistics_path = report_dir / "prediction-statistics.json"
+        if report_path.exists() and statistics_path.exists():
+            continue
+        _write_prediction_report(
+            records,
+            vocabulary,
+            predictions_by_path,
+            threshold=threshold,
+            output_dir=report_dir,
+        )
 
 
 def predict_image(model_path: Path, image_path: Path) -> dict[str, float]:

@@ -8,7 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 
 CSV_PATH = Path(r"X:\Monitoring\ControlefotosJRC\traindata_with_simplified_classes.csv")
-DATASET_ROOT = Path(r"X:\Monitoring\geophototagger\trainingsdata")
+DATASET_ROOT = Path(r"X:\Monitoring\phototagger\trainingsdata")
 SPLITS = (
     ("train", 0, 10),
     ("validation", 10, 15),
