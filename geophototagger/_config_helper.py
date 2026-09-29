@@ -1,10 +1,9 @@
 import configparser
 from pathlib import Path
-from typing import Optional
 
 
-def read_config(config_files: Optional[list[Path]] = None) -> dict:
-    """Reads and validates geophototagger configuration files.
+def read_config(config_files: list[Path] | None = None) -> dict:
+    """Read and validate layered geophototagger configuration files.
 
     Following configuration files will be loaded. Parameters of the last file where they
     are defined will override the previous ones:
@@ -20,8 +19,11 @@ def read_config(config_files: Optional[list[Path]] = None) -> dict:
 
     Returns:
         dict: the configuration, with all parameters in the correct type.
-    """
 
+    Raises:
+        ValueError: If a required input directory or PlantNet API key is
+            missing or still set to ``MUST_OVERRIDE``.
+    """
     # Determine config files to load
     # ------------------------------
     config_files_all = []
