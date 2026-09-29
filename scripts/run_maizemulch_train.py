@@ -45,7 +45,7 @@ def main() -> None:
 
     model_dir = project_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / f"geophototagger-{project}_{version}.keras"
+    model_path = model_dir / f"phototagger-{project}_{version}.keras"
     evaluation_dir = training_dir / "evaluation"
     evaluation_dir.mkdir(parents=True, exist_ok=True)
     classes = {"korrelmais"}

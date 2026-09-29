@@ -10,13 +10,14 @@ from geophototagger.custom.dataset import discover_records
 
 def main() -> None:
     """Predict a labeled directory and write threshold-specific reports."""
-    input_dir = Path(r"Q:\phototagger\trainingdata_raw\stalmest\agrilens_stalmest_2025")
+    input_dir = Path("Q:/phototagger/trainingdata_raw/stalmest/agrilens_stalmest_2025")
+    input_dir = Path("Q:/phototagger/trainingdata_raw/varia/test_extra")
     project = "maizemulch"
-    version = "01.large"
+    version = "02.large"
     project_dir = Path(f"X:/Monitoring/phototagger/{project}")
-    model_path = project_dir / "models" / f"geophototagger-{project}_{version}.keras"
-    output_dir = input_dir.parent / f"{input_dir.name}_{version}/misclassified"
-    thresholds = (0.5,)
+    model_path = project_dir / "models" / f"phototagger-{project}_{version}.keras"
+    output_dir = input_dir.parent / f"{input_dir.name}_{version}"
+    thresholds = (0.5, 0.6, 0.7, 0.8)
     batch_size = 32
     workers = 4
 
@@ -34,6 +35,9 @@ def main() -> None:
     ):
         raise ValueError("Thresholds must be unique values between 0 and 1")
 
+    logging.info(
+        "Writing prediction reports and misclassified images to %s", output_dir
+    )
     predict_images(
         model_path,
         records,

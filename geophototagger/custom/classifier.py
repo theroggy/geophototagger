@@ -167,7 +167,7 @@ def _prediction_progress_callback(
     )
 
 
-def _write_prediction_report(
+def write_prediction_report(
     records: list[ImageRecord],
     vocabulary: list[str],
     predictions_by_path: dict[str, dict[str, float]],
@@ -956,7 +956,7 @@ def _write_prediction_reports(
         statistics_path = report_dir / "prediction-statistics.json"
         if report_path.exists() and statistics_path.exists():
             continue
-        _write_prediction_report(
+        write_prediction_report(
             records,
             vocabulary,
             predictions_by_path,
