@@ -80,32 +80,8 @@ image to receive zero, one, or several tags.
 
 ## Classify with pretrained ImageNet categories
 
-For direct classification without training a custom model, edit `INPUT_PATH`,
-`OUTPUT_PATH`, `MODEL_NAME`, `THRESHOLD`, and `BATCH_SIZE` near the top of
-`scripts/run_imagenet_classify.py`, then run:
-
-```powershell
-python scripts/run_imagenet_classify.py
-```
-
-`INPUT_PATH` can point to a single image or a flat image directory; no labels
-are needed in filenames. Supported formats are JPG, JPEG, PNG, BMP, and WebP.
-The script writes one CSV row per matching category with the image path, model,
-class index, WordNet synset, English label, and probability. For a single image,
-it also prints matches to the console. Images with no matches produce no data
-rows in the CSV; the header is always written.
-
-`MODEL_NAME = "efficientnetv2"` uses an ImageNet-21k EfficientNetV2-S model with
-21,843 classes. `MODEL_NAME = "convnext"` uses ConvNeXt-Tiny trained on the
-related but different ImageNet-22k set with 21,841 classes. The respective
-class indices and names must not be interchanged. Both pretrained checkpoints
-are downloaded and cached by `timm` on first use, so the initial run needs
-network access. Set `THRESHOLD` to a probability between 0 and 1 (default
-0.01); all categories meeting it are included, with no top-k fallback.
-
-These scores are softmax probabilities across the model's mutually exclusive
-ImageNet categories, unlike the independent sigmoid scores of the custom
-multilabel classifier. They are not calibrated as separate tag probabilities.
+Pretrained ImageNet21k classification is available through the
+[`scripts/run_imagenet_classify.py`](scripts/run_imagenet_classify.py) script.
 
 ## Simplify ControlefotosJRC classes
 
