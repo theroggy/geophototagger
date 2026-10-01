@@ -4,21 +4,21 @@ from pathlib import Path
 
 from geophototagger.imagenet21k import classify_images
 
-INPUT_PATH = Path("Q:/phototagger/trainingdata_raw/varia/test_extra")
-OUTPUT_DIR = Path("Q:/phototagger/trainingdata_raw/varia/test_extra_imagenet")
-MODEL_NAME = "efficientnetv2"
-THRESHOLD = 0.01
-BATCH_SIZE = 8
-
 
 def main() -> None:
     """Predict and append one row per image, skipping already-known images."""
+    input_path = Path("Q:/phototagger/trainingdata_raw/varia/test_extra")
+    output_dir = input_path.parent / f"{input_path.name}_imagenet"
+    model_name = "efficientnetv2"
+    threshold = 0.01
+    batch_size = 8
+
     classify_images(
-        INPUT_PATH,
-        model_name=MODEL_NAME,
-        threshold=THRESHOLD,
-        batch_size=BATCH_SIZE,
-        output_dir=OUTPUT_DIR,
+        input_path,
+        model_name=model_name,
+        threshold=threshold,
+        batch_size=batch_size,
+        output_dir=output_dir,
     )
 
 

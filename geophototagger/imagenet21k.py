@@ -7,6 +7,7 @@ import importlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from PIL import Image
 from tqdm.auto import tqdm
@@ -31,7 +32,7 @@ class Prediction:
 
 def classify_images(
     images: list[Path] | Path,
-    model_name: str = "efficientnetv2",
+    model_name: Literal["efficientnetv2", "convnext"] = "efficientnetv2",
     threshold: float = 0.01,
     batch_size: int = 8,
     output_dir: Path | None = None,
