@@ -11,7 +11,7 @@ from geophototagger.custom.dataset import (
     ImageRecord,
     discover_records,
     encode_labels,
-    label_vocabulary,
+    determine_classes,
     read_manifest,
     write_manifest,
 )
@@ -146,7 +146,7 @@ def test_manifest_round_trip_supports_multiple_labels(tmp_path: Path) -> None:
 
     records = read_manifest(manifest_path, dataset_root=tmp_path)
 
-    assert label_vocabulary(records) == ["maize", "manure"]
+    assert determine_classes(records) == ["maize", "manure"]
     assert encode_labels(records, ["maize", "manure"]) == [[1, 1]]
 
 
@@ -603,8 +603,8 @@ def test_existing_model_skips_training_and_still_writes_reports(
         [training_record],
         ["maize"],
         model_path,
-        validation_records=[validation_record],
-        test_records=[test_record],
+        validation_images=[validation_record],
+        test_images=[test_record],
         evaluation_dir=tmp_path / "reports",
         thresholds=(0.5, 0.7),
     )

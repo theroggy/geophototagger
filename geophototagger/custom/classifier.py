@@ -96,13 +96,13 @@ def _make_image_sequence_class(keras: Any) -> type:
 
 
 def calculate_class_weights(
-    labels: list[list[int]], vocabulary: list[str]
+    labels: list[list[int]], classes: list[str]
 ) -> dict[str, dict[str, float]]:
     """Calculate balanced positive and negative weights for each label.
 
     Args:
         labels: Multi-hot label vectors for the training records.
-        vocabulary: Ordered label names corresponding to vector columns.
+        classes: Ordered label names corresponding to vector columns.
 
     Returns:
         Mapping from each label to its positive and negative training weights.
@@ -111,11 +111,11 @@ def calculate_class_weights(
         ValueError: If inputs are empty or a label has no positive or negative
             examples.
     """
-    if not labels or not vocabulary:
-        raise ValueError("Class weights require labels and a vocabulary")
+    if not labels or not classes:
+        raise ValueError("Class weights require labels and classes")
     record_count = len(labels)
     weights: dict[str, dict[str, float]] = {}
-    for index, label in enumerate(vocabulary):
+    for index, label in enumerate(classes):
         positive_count = sum(row[index] for row in labels)
         negative_count = record_count - positive_count
         if not positive_count or not negative_count:
@@ -131,16 +131,16 @@ def calculate_class_weights(
 
 def _sample_weights(
     labels: list[list[int]],
-    vocabulary: list[str],
+    classes: list[str],
     class_weights: dict[str, dict[str, float]],
 ) -> list[float]:
     """Collapse per-label weights to one compatible weight per image."""
     return [
         sum(
             class_weights[label]["positive" if value else "negative"]
-            for label, value in zip(vocabulary, row, strict=True)
+            for label, value in zip(classes, row, strict=True)
         )
-        / len(vocabulary)
+        / len(classes)
         for row in labels
     ]
 
@@ -169,7 +169,7 @@ def _prediction_progress_callback(
 
 def write_prediction_report(
     records: list[ImageRecord],
-    vocabulary: list[str],
+    classes: list[str],
     predictions_by_path: dict[str, dict[str, float]],
     *,
     threshold: float,
@@ -184,7 +184,7 @@ def write_prediction_report(
             "true_negatives": 0,
             "false_negatives": 0,
         }
-        for label in vocabulary
+        for label in classes
     }
     correctly_classified_count = 0
     report_path = output_dir / "prediction-results.csv"
@@ -196,7 +196,7 @@ def write_prediction_report(
                 "expected_labels",
                 "predicted_labels",
                 "correctly_classified",
-                *(f"{label}_probability" for label in vocabulary),
+                *(f"{label}_probability" for label in classes),
             ],
         )
         writer.writeheader()
@@ -229,7 +229,7 @@ def write_prediction_report(
                     "correctly_classified": correctly_classified,
                     **{
                         f"{label}_probability": predicted_probabilities[label]
-                        for label in vocabulary
+                        for label in classes
                     },
                 }
             )
@@ -350,6 +350,7 @@ def _build_model(
                 keras.layers.RandomRotation(0.08),
                 keras.layers.RandomZoom(0.1),
                 keras.layers.RandomContrast(0.1),
+                keras.layers.RandomBrightness(0.1),
             ],
             name="data_augmentation",
         )(augmented_inputs)
@@ -407,14 +408,14 @@ def _split_training_records(
 
 
 def _log_class_counts(
-    dataset_name: str, records: list[ImageRecord], vocabulary: list[str]
+    dataset_name: str, records: list[ImageRecord], classes: list[str]
 ) -> None:
     """Log the number of records containing each class and no classes."""
     counts = {
         "no classes": sum(not record.labels for record in records),
         **{
             label: sum(label in record.labels for record in records)
-            for label in vocabulary
+            for label in classes
         },
     }
     logging.info("%s dataset example counts: %s", dataset_name, counts)
@@ -422,7 +423,7 @@ def _log_class_counts(
 
 def _fit_model(
     records: list[ImageRecord],
-    vocabulary: list[str],
+    classes: list[str],
     output_path: Path,
     *,
     validation_records: list[ImageRecord],
@@ -443,7 +444,7 @@ def _fit_model(
 
     Args:
         records: Training image records.
-        vocabulary: Ordered labels used by the model output.
+        classes: Ordered labels used by the model output.
         output_path: Destination for the saved Keras model.
         validation_records: Records used only for validation.
         image_size: Height and width used when loading images.
@@ -464,8 +465,8 @@ def _fit_model(
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.with_suffix(".csv").unlink(missing_ok=True)
-    _log_class_counts("Training", records, vocabulary)
-    _log_class_counts("Validation", validation_records, vocabulary)
+    _log_class_counts("Training", records, classes)
+    _log_class_counts("Validation", validation_records, classes)
 
     keras = _keras()
     keras.utils.set_random_seed(seed)
@@ -474,21 +475,21 @@ def _fit_model(
         {"workers": workers, "use_multiprocessing": False} if workers else {}
     )
     labels = np.array(
-        [[int(label in record.labels) for label in vocabulary] for record in records]
+        [[int(label in record.labels) for label in classes] for record in records]
     )
-    class_weights = calculate_class_weights(labels.tolist(), vocabulary)
+    class_weights = calculate_class_weights(labels.tolist(), classes)
     if class_weighting:
         logging.info("Using class weights: %s", class_weights)
     else:
         logging.info("Class weighting is disabled")
     train_labels = np.array(
-        [[int(label in record.labels) for label in vocabulary] for record in records]
+        [[int(label in record.labels) for label in classes] for record in records]
     )
     validation_dataset = None
     if validation_records:
         validation_labels = np.array(
             [
-                [int(label in record.labels) for label in vocabulary]
+                [int(label in record.labels) for label in classes]
                 for record in validation_records
             ]
         )
@@ -500,7 +501,7 @@ def _fit_model(
             **dataset_kwargs,
         )
     sample_weights = (
-        np.array(_sample_weights(train_labels.tolist(), vocabulary, class_weights))
+        np.array(_sample_weights(train_labels.tolist(), classes, class_weights))
         if class_weighting
         else None
     )
@@ -514,7 +515,7 @@ def _fit_model(
         **dataset_kwargs,
     )
     model, feature_extractor = _build_model(
-        len(vocabulary),
+        len(classes),
         image_size=image_size,
         backbone=backbone,
         weights=weights,
@@ -561,7 +562,7 @@ def _fit_model(
     metadata_path.write_text(
         json.dumps(
             {
-                "labels": vocabulary,
+                "labels": classes,
                 "image_size": list(image_size),
                 "backbone": backbone,
                 "threshold": 0.5,
@@ -577,12 +578,12 @@ def _fit_model(
 
 
 def train_model(
-    records: list[ImageRecord],
-    vocabulary: list[str],
+    train_images: list[ImageRecord],
+    classes: list[str],
     output_path: Path,
     *,
-    validation_records: list[ImageRecord] | None = None,
-    test_records: list[ImageRecord] | None = None,
+    validation_images: list[ImageRecord] | None = None,
+    test_images: list[ImageRecord] | None = None,
     image_size: tuple[int, int] = (224, 224),
     backbone: str = "EfficientNetV2B0",
     weights: str | None = "imagenet",
@@ -592,7 +593,7 @@ def train_model(
     thresholds: Collection[float] = (0.5,),
     frozen_backbone_epochs: int = 5,
     augment: bool = True,
-    class_weighting: bool = True,
+    class_weighting: bool = False,
     early_stopping_patience: int = 10,
     monitor_metric: str = "loss",
     evaluation_dir: Path | None = None,
@@ -603,12 +604,12 @@ def train_model(
     """Train and save a multilabel classifier and its metadata.
 
     Args:
-        records: Training image records.
-        vocabulary: Ordered labels used by the model output.
+        train_images: Training image records.
+        classes: Ordered labels used by the model output.
         output_path: Destination for the saved Keras model.
-        validation_records: Optional explicit validation records. When set,
+        validation_images: Optional explicit validation records. When set,
             ``validation_split`` must be zero.
-        test_records: Optional held-out records used only to collect
+        test_images: Optional held-out records used only to collect
             misclassified images; never used for training or validation.
         image_size: Height and width used when loading images.
         backbone: Name of the Keras Applications backbone.
@@ -648,7 +649,7 @@ def train_model(
         ValueError: If records are empty, validation settings conflict, or the
             validation split is outside the range [0, 1).
     """
-    if not records:
+    if not train_images:
         raise ValueError("Cannot train without image records")
     if frozen_backbone_epochs < 0:
         raise ValueError("frozen_backbone_epochs must not be negative")
@@ -659,8 +660,8 @@ def train_model(
         0 <= threshold <= 1 for threshold in thresholds
     ):
         raise ValueError("Prediction thresholds must be unique values between 0 and 1")
-    if (validation_records is not None and validation_split) or (
-        validation_records and not validation_split == 0.0
+    if (validation_images is not None and validation_split) or (
+        validation_images and not validation_split == 0.0
     ):
         raise ValueError(
             "Use either validation_records or validation_split, not both nor neither"
@@ -668,7 +669,7 @@ def train_model(
     if not 0 <= validation_split < 1:
         raise ValueError("validation_split must be between 0 and 1")
     train_records, validation_records_for_reporting = _split_training_records(
-        records, validation_records, validation_split, seed
+        train_images, validation_images, validation_split, seed
     )
     if output_path.exists() and not force:
         logging.info("Model already exists at %s; skipping training", output_path)
@@ -677,7 +678,7 @@ def train_model(
         logging.info("Training model to %s", output_path)
         model = _fit_model(
             train_records,
-            vocabulary,
+            classes,
             output_path,
             validation_records=validation_records_for_reporting,
             image_size=image_size,
@@ -696,9 +697,9 @@ def train_model(
 
     if evaluation_dir is not None:
         for split_name, split_records in (
-            ("train", records),
+            ("train", train_images),
             ("validation", validation_records_for_reporting),
-            ("test", test_records or []),
+            ("test", test_images or []),
         ):
             if not split_records:
                 continue
@@ -781,7 +782,7 @@ def _iter_prediction_batches(dataset: Any, workers: int) -> Any:
 def predict_images(
     model_path: Path,
     image_paths: list[Path] | list[ImageRecord],
-    batch_size: int = 32,
+    batch_size: int = 12,
     workers: int = 4,
     output_dir: Path | None = None,
     *,
@@ -926,7 +927,7 @@ def predict_images(
 
 def _write_prediction_reports(
     records: list[ImageRecord],
-    vocabulary: list[str],
+    classes: list[str],
     predictions_by_path: dict[str, dict[str, float]],
     output_dir: Path,
     thresholds: Collection[float] = (0.5,),
@@ -944,10 +945,10 @@ def _write_prediction_reports(
         path_key = str(record.image_path.resolve())
         if path_key not in predictions_by_path:
             raise ValueError(f"Prediction missing for image: {record.image_path}")
-        unknown_labels = set(record.labels) - set(vocabulary)
+        unknown_labels = set(record.labels) - set(classes)
         if unknown_labels:
             raise ValueError(
-                f"Image labels missing from vocabulary: {sorted(unknown_labels)}"
+                f"Image labels missing from classes: {sorted(unknown_labels)}"
             )
 
     for threshold in thresholds:
@@ -958,7 +959,7 @@ def _write_prediction_reports(
             continue
         write_prediction_report(
             records,
-            vocabulary,
+            classes,
             predictions_by_path,
             threshold=threshold,
             output_dir=report_dir,
