@@ -78,6 +78,11 @@ python -m geophototagger.predict `
 The model output uses a sigmoid probability for every label, allowing one
 image to receive zero, one, or several tags.
 
+## Classify with pretrained ImageNet categories
+
+Pretrained ImageNet21k classification is available through the
+[`scripts/run_imagenet_classify.py`](scripts/run_imagenet_classify.py) script.
+
 ## Simplify ControlefotosJRC classes
 
 Convert the JRC training CSV while preserving its original columns:

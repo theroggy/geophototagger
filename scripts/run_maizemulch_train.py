@@ -21,7 +21,7 @@ def main() -> None:
     TEST_DATASET_ROOT = Path(r"X:\Monitoring\phototagger\trainingsdata\test")
 
     project = "maizemulch"
-    version = "02.large"
+    version = "03.large"
     project_dir = Path(f"X:/Monitoring/phototagger/{project}")
     project_dir.mkdir(parents=True, exist_ok=True)
     training_dir = project_dir / "training" / version
