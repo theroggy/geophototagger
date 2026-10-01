@@ -1,4 +1,5 @@
 import csv
+import json
 import math
 import sys
 from contextlib import nullcontext
@@ -57,6 +58,9 @@ def fake_inference(monkeypatch: pytest.MonkeyPatch):
         def eval(self):
             return self
 
+        def to(self, device):
+            return self
+
         def __call__(self, images: list[int]) -> FakeProbabilities:
             return FakeProbabilities(
                 [
@@ -78,7 +82,17 @@ def fake_inference(monkeypatch: pytest.MonkeyPatch):
             create_transform=lambda **_kwargs: lambda image: image.getpixel((0, 0))[0],
         ),
     )
-    torch = SimpleNamespace(stack=lambda images: images, inference_mode=nullcontext)
+
+    class FakeTensor(list):
+        def to(self, device):
+            return self
+
+    torch = SimpleNamespace(
+        stack=FakeTensor,
+        inference_mode=nullcontext,
+        device=lambda name: name,
+        cuda=SimpleNamespace(is_available=lambda: False),
+    )
     monkeypatch.setitem(sys.modules, "timm", timm)
     monkeypatch.setitem(sys.modules, "torch", torch)
     return calls
@@ -119,6 +133,21 @@ def test_threshold_can_return_no_matches(tmp_path: Path) -> None:
     assert imagenet21k.classify_images([image_path], threshold=1) == [(image_path, [])]
 
 
+@pytest.mark.usefixtures("fake_inference")
+def test_directory_input_classifies_supported_images_in_order(tmp_path: Path) -> None:
+    first = make_image(tmp_path / "a.png", 10)
+    second = make_image(tmp_path / "b.png", 20)
+    (tmp_path / "ignore.txt").write_text("ignore", encoding="utf-8")
+    results = imagenet21k.classify_images(tmp_path, threshold=1)
+    assert [path for path, _ in results] == [first, second]
+
+
+@pytest.mark.usefixtures("fake_inference")
+def test_single_file_input_is_classified(tmp_path: Path) -> None:
+    image_path = make_image(tmp_path / "image.png", 10)
+    assert imagenet21k.classify_images(image_path, threshold=1) == [(image_path, [])]
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -146,37 +175,36 @@ def test_script_discovers_files_and_writes_csv(
 ) -> None:
     image_path = make_image(tmp_path / "image.PNG", 10)
     (tmp_path / "other.txt").write_text("ignore", encoding="utf-8")
-    assert script.find_images(tmp_path) == [image_path]
-    assert script.find_images(image_path) == [image_path]
-    output_path = tmp_path / "output" / "predictions.csv"
+    output_dir = tmp_path / "output"
+    output_path = output_dir / "predictions.csv"
     monkeypatch.setattr(script, "INPUT_PATH", tmp_path)
-    monkeypatch.setattr(script, "OUTPUT_PATH", output_path)
+    monkeypatch.setattr(script, "OUTPUT_DIR", output_dir)
     monkeypatch.setattr(script, "THRESHOLD", 0.2)
     script.main()
     with output_path.open(encoding="utf-8", newline="") as output_file:
         rows = list(csv.DictReader(output_file))
-    assert len(rows) == 2
-    assert rows[0] == {
-        "image_path": str(image_path),
-        "model": "efficientnetv2",
-        "class_index": "1",
-        "synset": "n1",
-        "label": "class 1",
-        "probability": str(rows[0]["probability"]),
-    }
-    assert float(rows[0]["probability"]) == pytest.approx(0.66524, abs=0.00001)
+    assert len(rows) == 1
+    assert rows[0]["image_path"] == str(image_path)
+    assert rows[0]["model"] == "efficientnetv2"
+    predictions = json.loads(rows[0]["predictions"])
+    assert [prediction["class_index"] for prediction in predictions] == [1, 2]
+    assert predictions[0]["synset"] == "n1"
+    assert predictions[0]["label"] == "class 1"
+    assert predictions[0]["probability"] == pytest.approx(0.66524, abs=0.00001)
 
 
 @pytest.mark.usefixtures("fake_inference")
-def test_script_keeps_header_with_no_matches(
+def test_script_writes_empty_predictions_list_with_no_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     make_image(tmp_path / "image.png", 10)
-    output_path = tmp_path / "empty.csv"
+    output_dir = tmp_path / "empty"
+    output_path = output_dir / "predictions.csv"
     monkeypatch.setattr(script, "INPUT_PATH", tmp_path)
-    monkeypatch.setattr(script, "OUTPUT_PATH", output_path)
+    monkeypatch.setattr(script, "OUTPUT_DIR", output_dir)
     monkeypatch.setattr(script, "THRESHOLD", 1.0)
     script.main()
-    assert output_path.read_text(encoding="utf-8").strip() == (
-        "image_path,model,class_index,synset,label,probability"
-    )
+    with output_path.open(encoding="utf-8", newline="") as output_file:
+        rows = list(csv.DictReader(output_file))
+    assert len(rows) == 1
+    assert json.loads(rows[0]["predictions"]) == []
