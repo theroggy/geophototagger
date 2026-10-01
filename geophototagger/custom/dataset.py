@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import csv
 import logging
-from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 SUPPORTED_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})
 LABEL_SEPARATOR = ";"
@@ -198,16 +201,16 @@ def read_manifest(
     return records
 
 
-def label_vocabulary(records: list[ImageRecord]) -> list[str]:
-    """Build a sorted label vocabulary from image records.
+def determine_classes(images: list[ImageRecord]) -> list[str]:
+    """Build a sorted class vocabulary from image records.
 
     Args:
-        records: Image records whose labels should be collected.
+        images: Image records whose labels should be collected.
 
     Returns:
-        Sorted unique labels suitable for multi-hot encoding.
+        Sorted unique classes suitable for multi-hot encoding.
     """
-    return sorted({label for record in records for label in record.labels})
+    return sorted({label for record in images for label in record.labels})
 
 
 def encode_labels(records: list[ImageRecord], vocabulary: list[str]) -> list[list[int]]:

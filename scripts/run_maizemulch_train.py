@@ -5,7 +5,7 @@ from pathlib import Path
 
 from geophototagger.custom.classifier import train_model
 from geophototagger.custom.dataset import (
-    label_vocabulary,
+    determine_classes,
     read_manifest,
     write_manifest,
 )
@@ -80,15 +80,16 @@ def main() -> None:
     test_records = read_manifest(test_manifest_path, dataset_root=TEST_DATASET_ROOT)
     train_model(
         records,
-        label_vocabulary(records),
-        model_path,
-        validation_records=validation_records,
-        test_records=test_records,
+        classes=determine_classes(records),
+        output_path=model_path,
+        validation_images=validation_records,
+        test_images=test_records,
         image_size=image_size,
         thresholds=thresholds,
         frozen_backbone_epochs=frozen_backbone_epochs,
-        monitor_metric="precision",
+        # monitor_metric="precision",
         evaluation_dir=evaluation_dir,
+        class_weighting=False,
         force=force,
     )
 
