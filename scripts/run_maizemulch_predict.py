@@ -19,7 +19,7 @@ def main() -> None:
     ]
 
     project = "maizemulch"
-    version = "03.large"
+    version = "05.ratio"
     project_dir = Path(f"X:/Monitoring/phototagger/{project}")
     model_path = project_dir / "models" / f"phototagger-{project}_{version}.keras"
 

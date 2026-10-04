@@ -1,22 +1,29 @@
-"""Keras 3 image tagging with the PyTorch backend."""
+"""Keras 3 image tagging with the PyTorch backend.
+
+Defaults for the training configuration are inspired from
+https://www.identifyshell.org/blog-fine-tuning-efficientnetv2-models.php
+"""
 
 from __future__ import annotations
 
 import csv
 import json
 import logging
+import math
 import os
 import shutil
-from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from tqdm.auto import tqdm
 
 from .dataset import ImageRecord
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 
 def _keras() -> Any:
@@ -28,22 +35,38 @@ def _keras() -> Any:
 
 
 def _load_image_batch(
-    records: list[ImageRecord], image_size: tuple[int, int]
+    records: list[ImageRecord],
+    image_size: tuple[int, int],
+    *,
+    crop_to_aspect_ratio: bool = True,
 ) -> np.ndarray:
     """Load a batch of images into a single ndarray."""
     keras = _keras()
     images = [
         keras.utils.img_to_array(
-            keras.utils.load_img(record.image_path, target_size=image_size)
+            keras.utils.load_img(
+                record.image_path,
+                target_size=image_size,
+                keep_aspect_ratio=crop_to_aspect_ratio,
+            )
         )
         for record in records
     ]
     return np.array(images)
 
 
-def _load_images(records: list[ImageRecord], image_size: tuple[int, int]) -> Any:
+def _load_images(
+    records: list[ImageRecord],
+    image_size: tuple[int, int],
+    *,
+    crop_to_aspect_ratio: bool = True,
+) -> Any:
     keras = _keras()
-    return keras.ops.convert_to_tensor(_load_image_batch(records, image_size))
+    return keras.ops.convert_to_tensor(
+        _load_image_batch(
+            records, image_size, crop_to_aspect_ratio=crop_to_aspect_ratio
+        )
+    )
 
 
 def _make_image_sequence_class(keras: Any) -> type:
@@ -57,6 +80,7 @@ def _make_image_sequence_class(keras: Any) -> type:
             *,
             labels: np.ndarray | None = None,
             sample_weights: np.ndarray | None = None,
+            crop_to_aspect_ratio: bool = True,
             batch_size: int = 32,
             shuffle: bool = False,
             **kwargs: Any,
@@ -66,6 +90,7 @@ def _make_image_sequence_class(keras: Any) -> type:
             self.image_size = image_size
             self.labels = labels
             self.sample_weights = sample_weights
+            self.crop_to_aspect_ratio = crop_to_aspect_ratio
             self.batch_size = batch_size
             self.shuffle = shuffle
             self.indices = np.arange(len(records))
@@ -79,7 +104,9 @@ def _make_image_sequence_class(keras: Any) -> type:
                 index * self.batch_size : (index + 1) * self.batch_size
             ]
             batch_images = _load_image_batch(
-                [self.records[i] for i in batch_indices], self.image_size
+                [self.records[i] for i in batch_indices],
+                self.image_size,
+                crop_to_aspect_ratio=self.crop_to_aspect_ratio,
             )
             if self.labels is None:
                 return batch_images
@@ -291,11 +318,10 @@ def write_prediction_report(
     )
 
 
-def _compile_model(keras: Any, model: Any, learning_rate: float | None = None) -> None:
+def _compile_model(keras: Any, model: Any, learning_rate: float = 1e-3) -> None:
     """Compile a classifier model with the configured optimizer and metrics."""
-    optimizer_kwargs = {"learning_rate": learning_rate} if learning_rate else {}
     model.compile(
-        optimizer=keras.optimizers.Adam(**optimizer_kwargs),
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
         loss=keras.losses.BinaryFocalCrossentropy(),
         metrics=[
             keras.metrics.BinaryAccuracy(name="binary_accuracy"),
@@ -312,21 +338,45 @@ def _make_csv_logger(keras: Any, path: Path, *, append: bool) -> Any:
         def on_train_begin(self, logs: dict[str, Any] | None = None) -> None:
             super().on_train_begin(logs)
             self.csv_file.close()
-            self.csv_file = open(  # noqa: SIM115
-                self.filename, "a" if self.append else "w", newline=""
+            self.csv_file = Path(self.filename).open(
+                "a" if self.append else "w", newline=""
             )
 
     return _CSVLogger(path, append=append)
 
 
+def _make_reduce_lr_callback(
+    keras: Any,
+    *,
+    monitor: str,
+    factor: float,
+    patience: int,
+    min_learning_rate: float,
+) -> Any:
+    """Lower the optimizer learning rate when the monitored metric plateaus."""
+    return keras.callbacks.ReduceLROnPlateau(
+        monitor=monitor,
+        factor=factor,
+        patience=patience,
+        min_lr=min_learning_rate,
+        verbose=1,
+    )
+
+
 def _build_model(
     class_count: int,
     image_size: tuple[int, int] = (224, 224),
-    backbone: str = "EfficientNetV2B0",
+    backbone: str = "EfficientNetV2S",
     weights: str | None = "imagenet",
     augment: bool = True,
+    *,
+    learning_rate: float = 1e-3,
+    head_dropout: float = 0.5,
+    head_l2: float = 0.005,
 ) -> tuple[Any, Any]:
     """Build a compiled classifier and its initially frozen feature extractor."""
+    _validate_learning_rate(learning_rate)
+    _validate_head_regularization(head_dropout, head_l2)
     keras = _keras()
     try:
         backbone_factory = getattr(keras.applications, backbone)
@@ -355,18 +405,28 @@ def _build_model(
             name="data_augmentation",
         )(augmented_inputs)
     features = feature_extractor(augmented_inputs, training=False)
-    outputs = keras.layers.Dense(class_count, activation="sigmoid")(features)
+    if head_dropout:
+        features = keras.layers.Dropout(head_dropout, name="head_dropout")(features)
+    outputs = keras.layers.Dense(
+        class_count,
+        activation="sigmoid",
+        kernel_regularizer=(keras.regularizers.L2(head_l2) if head_l2 else None),
+    )(features)
     model = keras.Model(inputs, outputs)
-    _compile_model(keras, model)
+    _compile_model(keras, model, learning_rate=learning_rate)
     return model, feature_extractor
 
 
 def build_model(
     class_count: int,
     image_size: tuple[int, int] = (224, 224),
-    backbone: str = "EfficientNetV2B0",
+    backbone: str = "EfficientNetV2S",
     weights: str | None = "imagenet",
     augment: bool = True,
+    *,
+    learning_rate: float = 1e-3,
+    head_dropout: float = 0.5,
+    head_l2: float = 0.005,
 ) -> Any:
     """Build a frozen Keras Applications backbone with a sigmoid head.
 
@@ -376,6 +436,9 @@ def build_model(
         backbone: Name of the Keras Applications backbone to use.
         weights: Backbone weights, typically ``"imagenet"`` or ``None``.
         augment: Whether to include random training-time augmentation layers.
+        learning_rate: Initial Adam learning rate.
+        head_dropout: Dropout rate applied before the classification output.
+        head_l2: L2 regularization strength for the output kernel.
 
     Returns:
         A compiled Keras multilabel classification model.
@@ -383,8 +446,29 @@ def build_model(
     Raises:
         ValueError: If ``backbone`` is not available in Keras Applications.
     """
-    model, _ = _build_model(class_count, image_size, backbone, weights, augment)
+    model, _ = _build_model(
+        class_count,
+        image_size,
+        backbone,
+        weights,
+        augment,
+        learning_rate=learning_rate,
+        head_dropout=head_dropout,
+        head_l2=head_l2,
+    )
     return model
+
+
+def _validate_learning_rate(learning_rate: float) -> None:
+    if not learning_rate > 0:
+        raise ValueError("learning_rate must be greater than zero")
+
+
+def _validate_head_regularization(head_dropout: float, head_l2: float) -> None:
+    if not 0 <= head_dropout < 1:
+        raise ValueError("head_dropout must be between 0 and 1")
+    if not head_l2 >= 0:
+        raise ValueError("head_l2 must not be negative")
 
 
 def _split_training_records(
@@ -421,6 +505,55 @@ def _log_class_counts(
     logging.info("%s dataset example counts: %s", dataset_name, counts)
 
 
+def _unfreeze_top_backbone_layers(
+    feature_extractor: Any,
+    layer_count: int | float = 0.1,
+    *,
+    expand_to_blocks: bool = True,
+) -> None:
+    """Unfreeze final layers by count or fraction, optionally expanding blocks.
+
+    Keeping each block's layers trainable or frozen together avoids fine-tuning
+    only part of a block while the rest of its transformation remains fixed.
+    Integer values specify an exact layer count; floats from 0 to 1 specify a
+    fraction of all layers and are rounded up. Set ``expand_to_blocks=False``
+    to use the resulting count without expanding to whole blocks.
+    """
+    _validate_unfrozen_backbone_layers(layer_count)
+    layers = feature_extractor.layers
+    if isinstance(layer_count, float):
+        layer_count = math.ceil(len(layers) * layer_count)
+    if not layer_count:
+        feature_extractor.trainable = False
+        return
+    feature_extractor.trainable = True
+    first_trainable_layer = max(0, len(layers) - layer_count)
+    if expand_to_blocks:
+        selected_blocks = {
+            layer.name.partition("_")[0]
+            for layer in layers[first_trainable_layer:]
+            if getattr(layer, "name", "").startswith("block") and "_" in layer.name
+        }
+        for index, layer in enumerate(layers):
+            if layer.name.partition("_")[0] in selected_blocks:
+                first_trainable_layer = min(first_trainable_layer, index)
+    for index, layer in enumerate(layers):
+        layer.trainable = index >= first_trainable_layer
+
+
+def _validate_unfrozen_backbone_layers(layer_count: int | float) -> None:
+    if isinstance(layer_count, bool) or not isinstance(layer_count, (int, float)):
+        raise ValueError(
+            "unfrozen_backbone_layers must be a nonnegative integer count or "
+            "a float fraction between 0 and 1"
+        )
+    if isinstance(layer_count, int):
+        if layer_count < 0:
+            raise ValueError("unfrozen_backbone_layers must not be negative")
+    elif not 0 <= layer_count <= 1:
+        raise ValueError("float unfrozen_backbone_layers must be between 0 and 1")
+
+
 def _fit_model(
     records: list[ImageRecord],
     classes: list[str],
@@ -428,14 +561,22 @@ def _fit_model(
     *,
     validation_records: list[ImageRecord],
     image_size: tuple[int, int],
+    crop_to_aspect_ratio: bool,
     backbone: str,
     weights: str | None,
     epochs: int,
     seed: int,
-    frozen_backbone_epochs: int,
+    frozen_epochs: int,
     augment: bool,
+    unfrozen_backbone_layers: int | float,
+    head_dropout: float,
+    head_l2: float,
+    learning_rate: float,
     class_weighting: bool,
     early_stopping_patience: int,
+    reduce_lr_patience: int,
+    reduce_lr_factor: float,
+    min_learning_rate: float,
     monitor_metric: str,
     batch_size: int,
     workers: int,
@@ -448,14 +589,24 @@ def _fit_model(
         output_path: Destination for the saved Keras model.
         validation_records: Records used only for validation.
         image_size: Height and width used when loading images.
+        crop_to_aspect_ratio: Whether to center-crop images to the target aspect
+            ratio before resizing, rather than stretch them.
         backbone: Keras Applications backbone name.
         weights: Initial backbone weights, or ``None``.
         epochs: Total training epochs.
         seed: Random seed used by Keras.
-        frozen_backbone_epochs: Initial epochs with a frozen backbone.
+        frozen_epochs: Initial epochs with a completely frozen backbone.
         augment: Whether to enable training-time image augmentation.
+        unfrozen_backbone_layers: Number of final backbone layers to fine-tune, or
+            a float fraction of the backbone layers.
+        head_dropout: Dropout rate applied before the classification output.
+        head_l2: L2 regularization strength for the output kernel.
+        learning_rate: Initial Adam learning rate for both training phases.
         class_weighting: Whether to apply balanced per-image weights.
         early_stopping_patience: Epochs without improvement before stopping.
+        reduce_lr_patience: Epochs without improvement before reducing learning rate.
+        reduce_lr_factor: Multiplier applied to learning rate after a plateau.
+        min_learning_rate: Lower bound for the learning rate.
         monitor_metric: Metric used to select checkpoints and stop training.
         batch_size: Images per training batch.
         workers: Background image-loading threads; zero loads synchronously.
@@ -497,6 +648,7 @@ def _fit_model(
             validation_records,
             image_size,
             labels=validation_labels,
+            crop_to_aspect_ratio=crop_to_aspect_ratio,
             batch_size=batch_size,
             **dataset_kwargs,
         )
@@ -510,6 +662,7 @@ def _fit_model(
         image_size,
         labels=train_labels,
         sample_weights=sample_weights,
+        crop_to_aspect_ratio=crop_to_aspect_ratio,
         batch_size=batch_size,
         shuffle=True,
         **dataset_kwargs,
@@ -520,6 +673,9 @@ def _fit_model(
         backbone=backbone,
         weights=weights,
         augment=augment,
+        learning_rate=learning_rate,
+        head_dropout=head_dropout,
+        head_l2=head_l2,
     )
     fit_kwargs: dict[str, Any] = {"epochs": epochs}
     if validation_dataset is not None:
@@ -534,6 +690,13 @@ def _fit_model(
         keras.callbacks.ModelCheckpoint(
             output_path, monitor=monitor, save_best_only=True
         ),
+        _make_reduce_lr_callback(
+            keras,
+            monitor=monitor,
+            factor=reduce_lr_factor,
+            patience=reduce_lr_patience,
+            min_learning_rate=min_learning_rate,
+        ),
     ]
     if early_stopping_patience:
         callbacks.append(
@@ -546,14 +709,16 @@ def _fit_model(
         )
     fit_kwargs["callbacks"] = callbacks
 
-    frozen_epochs = min(epochs, frozen_backbone_epochs)
+    frozen_epochs = min(epochs, frozen_epochs)
     if frozen_epochs:
         fit_kwargs["epochs"] = frozen_epochs
         model.fit(train_dataset, **fit_kwargs)
     if frozen_epochs < epochs:
         logging.info("Unfreezing the feature extractor after %d epochs", frozen_epochs)
-        feature_extractor.trainable = True
-        _compile_model(keras, model, learning_rate=1e-4)
+        _unfreeze_top_backbone_layers(
+            feature_extractor, layer_count=unfrozen_backbone_layers
+        )
+        _compile_model(keras, model, learning_rate=learning_rate)
         fit_kwargs["initial_epoch"] = frozen_epochs
         fit_kwargs["epochs"] = epochs
         model.fit(train_dataset, **fit_kwargs)
@@ -564,11 +729,19 @@ def _fit_model(
             {
                 "labels": classes,
                 "image_size": list(image_size),
+                "crop_to_aspect_ratio": crop_to_aspect_ratio,
                 "backbone": backbone,
                 "threshold": 0.5,
                 "augmentation": augment,
                 "class_weighting": class_weighting,
                 "class_weights": class_weights,
+                "unfrozen_backbone_layers": unfrozen_backbone_layers,
+                "head_dropout": head_dropout,
+                "head_l2": head_l2,
+                "learning_rate": learning_rate,
+                "reduce_lr_patience": reduce_lr_patience,
+                "reduce_lr_factor": reduce_lr_factor,
+                "min_learning_rate": min_learning_rate,
             },
             indent=2,
         ),
@@ -585,18 +758,26 @@ def train_model(
     validation_images: list[ImageRecord] | None = None,
     test_images: list[ImageRecord] | None = None,
     image_size: tuple[int, int] = (224, 224),
-    backbone: str = "EfficientNetV2B0",
+    crop_to_aspect_ratio: bool = True,
+    backbone: str = "EfficientNetV2S",
     weights: str | None = "imagenet",
     epochs: int = 30,
     validation_split: float = 0.0,
     seed: int = 42,
-    thresholds: Collection[float] = (0.5,),
     frozen_backbone_epochs: int = 5,
     augment: bool = True,
+    unfrozen_backbone_layers: int | float = 0.1,
+    learning_rate: float = 1e-3,
+    head_dropout: float = 0.5,
+    head_l2: float = 0.005,
     class_weighting: bool = False,
     early_stopping_patience: int = 10,
+    reduce_lr_patience: int = 3,
+    reduce_lr_factor: float = 0.2,
+    min_learning_rate: float = 1e-6,
     monitor_metric: str = "loss",
     evaluation_dir: Path | None = None,
+    evaluation_thresholds: Collection[float] = (0.5,),
     batch_size: int = 32,
     workers: int = 4,
     force: bool = False,
@@ -612,28 +793,41 @@ def train_model(
         test_images: Optional held-out records used only to collect
             misclassified images; never used for training or validation.
         image_size: Height and width used when loading images.
+        crop_to_aspect_ratio: Center-crop images to the target aspect ratio,
+            preserving geometry but possibly trimming edges. Set to ``False``
+            to stretch images to the target dimensions.
         backbone: Name of the Keras Applications backbone.
         weights: Backbone weights, typically ``"imagenet"`` or ``None``.
         epochs: Number of training epochs.
         validation_split: Fraction of training data used for validation when
             explicit validation records are not supplied.
         seed: Random seed used by Keras.
-        thresholds: Prediction thresholds used for separate misclassification
-            reports.
         frozen_backbone_epochs: Number of initial epochs to train only the
             classification head before fine-tuning the feature extractor.
         augment: Whether to enable random training-time augmentation.
+        unfrozen_backbone_layers: Number of final backbone layers to fine-tune, or
+            a float fraction from 0 to 1. Fractional counts round up before
+            optional whole-block expansion.
+        learning_rate: Initial Adam learning rate for both training phases.
+        head_dropout: Dropout rate applied before the classification output.
+        head_l2: L2 regularization strength for the output kernel.
         class_weighting: Whether to apply balanced per-image sample weights.
         early_stopping_patience: Epochs with no monitored improvement before
             training stops early. Set to zero to disable early stopping.
+        reduce_lr_patience: Epochs without monitored improvement before reducing
+            the learning rate.
+        reduce_lr_factor: Multiplier applied to the learning rate after a plateau.
+        min_learning_rate: Lower bound for the learning rate.
         monitor_metric: Metric used to select the best checkpoint and to
             evaluate early stopping, e.g. ``"loss"``, ``"binary_accuracy"``,
             ``"precision"`` or ``"recall"``. A ``val_`` prefix is added
             automatically when validation data is available.
         evaluation_dir: Optional directory where evaluation information is written.
-            Misclassified images are copied into ``train_wrong``, ``validation_wrong``
-            and ``test_wrong`` subdirectories. Each split directory contains its
-            ``predictions.csv`` and threshold-specific report directories.
+            The evaluation information includes various artifacts, like a summary of
+            evaluation metrics and directories with copies of all misclassified images.
+        evaluation_thresholds: List of thresholds to report classification performance
+            at in the evaluation reports. Only relevant if ``evaluation_dir`` is
+            specified.
         batch_size: Number of images loaded into memory per training or
             prediction batch.
         workers: Number of background threads used to load image batches
@@ -653,11 +847,20 @@ def train_model(
         raise ValueError("Cannot train without image records")
     if frozen_backbone_epochs < 0:
         raise ValueError("frozen_backbone_epochs must not be negative")
-    thresholds = tuple(thresholds)
-    if not thresholds:
+    _validate_unfrozen_backbone_layers(unfrozen_backbone_layers)
+    _validate_learning_rate(learning_rate)
+    if reduce_lr_patience < 0:
+        raise ValueError("reduce_lr_patience must not be negative")
+    if not 0 < reduce_lr_factor < 1:
+        raise ValueError("reduce_lr_factor must be between 0 and 1")
+    if min_learning_rate < 0:
+        raise ValueError("min_learning_rate must not be negative")
+    _validate_head_regularization(head_dropout, head_l2)
+    evaluation_thresholds = tuple(evaluation_thresholds)
+    if not evaluation_thresholds:
         raise ValueError("At least one prediction threshold is required")
-    if len(set(thresholds)) != len(thresholds) or not all(
-        0 <= threshold <= 1 for threshold in thresholds
+    if len(set(evaluation_thresholds)) != len(evaluation_thresholds) or not all(
+        0 <= threshold <= 1 for threshold in evaluation_thresholds
     ):
         raise ValueError("Prediction thresholds must be unique values between 0 and 1")
     if (validation_images is not None and validation_split) or (
@@ -676,20 +879,33 @@ def train_model(
         model = _keras().models.load_model(output_path)
     else:
         logging.info("Training model to %s", output_path)
+
+        # Try avoiding memory errors
+        if os.environ.get("PYTORCH_CUDA_ALLOC_CONF") is None:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
         model = _fit_model(
             train_records,
             classes,
             output_path,
             validation_records=validation_records_for_reporting,
             image_size=image_size,
+            crop_to_aspect_ratio=crop_to_aspect_ratio,
             backbone=backbone,
             weights=weights,
             epochs=epochs,
             seed=seed,
-            frozen_backbone_epochs=frozen_backbone_epochs,
+            frozen_epochs=frozen_backbone_epochs,
             augment=augment,
+            unfrozen_backbone_layers=unfrozen_backbone_layers,
+            learning_rate=learning_rate,
+            head_dropout=head_dropout,
+            head_l2=head_l2,
             class_weighting=class_weighting,
             early_stopping_patience=early_stopping_patience,
+            reduce_lr_patience=reduce_lr_patience,
+            reduce_lr_factor=reduce_lr_factor,
+            min_learning_rate=min_learning_rate,
             monitor_metric=monitor_metric,
             batch_size=batch_size,
             workers=workers,
@@ -709,7 +925,7 @@ def train_model(
                 batch_size=batch_size,
                 workers=workers,
                 output_dir=evaluation_dir / f"{split_name}_wrong",
-                thresholds=thresholds,
+                thresholds=evaluation_thresholds,
             )
     return model
 
@@ -811,6 +1027,7 @@ def predict_images(
     """
     metadata = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
     image_size = tuple(metadata["image_size"])
+    crop_to_aspect_ratio = metadata.get("crop_to_aspect_ratio", False)
     labels = metadata["labels"]
     input_is_record = [
         isinstance(image_path, ImageRecord) for image_path in image_paths
@@ -864,7 +1081,12 @@ def predict_images(
     keras = _keras()
     model = keras.models.load_model(model_path)
     image_sequence_class = _make_image_sequence_class(keras)
-    dataset = image_sequence_class(pending_records, image_size, batch_size=batch_size)
+    dataset = image_sequence_class(
+        pending_records,
+        image_size,
+        crop_to_aspect_ratio=crop_to_aspect_ratio,
+        batch_size=batch_size,
+    )
     output_context = (
         prediction_path.open("a", encoding="utf-8", newline="")
         if prediction_path is not None
@@ -978,9 +1200,14 @@ def predict_image(model_path: Path, image_path: Path) -> dict[str, float]:
     """
     metadata = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
     image_size = tuple(metadata["image_size"])
+    crop_to_aspect_ratio = metadata.get("crop_to_aspect_ratio", False)
     keras = _keras()
     model = keras.models.load_model(model_path)
-    image = _load_images([ImageRecord(image_path, ())], image_size)
+    image = _load_images(
+        [ImageRecord(image_path, ())],
+        image_size,
+        crop_to_aspect_ratio=crop_to_aspect_ratio,
+    )
     logging.info("Predicting %s", image_path)
     probabilities = model.predict(image, verbose=0)[0]
     logging.info("Prediction complete for %s", image_path)

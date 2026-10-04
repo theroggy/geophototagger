@@ -14,14 +14,12 @@ from geophototagger.custom.dataset import (
 def main() -> None:
     """Generate train/validation/test manifests and train the configured model."""
     # Edit these values for the training run you want to execute.
-    TRAIN_DATASET_ROOT = Path(r"X:\Monitoring\phototagger\trainingsdata\train")
-    VALIDATION_DATASET_ROOT = Path(
-        r"X:\Monitoring\phototagger\trainingsdata\validation"
-    )
-    TEST_DATASET_ROOT = Path(r"X:\Monitoring\phototagger\trainingsdata\test")
+    train_data_dir = Path(r"X:\Monitoring\phototagger\trainingsdata\train")
+    validation_data_dir = Path(r"X:\Monitoring\phototagger\trainingsdata\validation")
+    test_data_dir = Path(r"X:\Monitoring\phototagger\trainingsdata\test")
 
     project = "maizemulch"
-    version = "03.large"
+    version = "05.ratio"
     project_dir = Path(f"X:/Monitoring/phototagger/{project}")
     project_dir.mkdir(parents=True, exist_ok=True)
     training_dir = project_dir / "training" / version
@@ -49,47 +47,59 @@ def main() -> None:
     evaluation_dir = training_dir / "evaluation"
     evaluation_dir.mkdir(parents=True, exist_ok=True)
     classes = {"korrelmais"}
-    image_size = (1024, 1024)
-    thresholds = (0.5, 0.6, 0.7, 0.8)
+    image_size = (512, 512)
+    crop_to_aspect_ratio = True
+    backbone = "EfficientNetV2S"
+    weights = "imagenet"
+    evaluation_thresholds = (0.5, 0.6, 0.7, 0.8)
     frozen_backbone_epochs = 5
+    unfrozen_backbone_layers = 0.1
+    learning_rate = 1e-3
+    head_dropout = 0.5
+    head_l2 = 0.005
+    reduce_lr_patience = 3
+    reduce_lr_factor = 0.2
+    min_learning_rate = 1e-6
     force = False
+    batch_size = 16
 
     logging.info("Writing training manifests.")
+    write_manifest(train_data_dir, train_manifest_path, classes=classes, force=force)
     write_manifest(
-        TRAIN_DATASET_ROOT,
-        train_manifest_path,
-        classes=classes,
-        force=force,
+        validation_data_dir, validation_manifest_path, classes=classes, force=force
     )
-    write_manifest(
-        VALIDATION_DATASET_ROOT,
-        validation_manifest_path,
-        classes=classes,
-        force=force,
+    write_manifest(test_data_dir, test_manifest_path, classes=classes, force=force)
+
+    train_images = read_manifest(train_manifest_path, dataset_root=train_data_dir)
+    validation_images = read_manifest(
+        validation_manifest_path, dataset_root=validation_data_dir
     )
-    write_manifest(
-        TEST_DATASET_ROOT,
-        test_manifest_path,
-        classes=classes,
-        force=force,
-    )
-    records = read_manifest(train_manifest_path, dataset_root=TRAIN_DATASET_ROOT)
-    validation_records = read_manifest(
-        validation_manifest_path, dataset_root=VALIDATION_DATASET_ROOT
-    )
-    test_records = read_manifest(test_manifest_path, dataset_root=TEST_DATASET_ROOT)
+    test_images = read_manifest(test_manifest_path, dataset_root=test_data_dir)
+
+    # Train the model with the specified parameters.
     train_model(
-        records,
-        classes=determine_classes(records),
+        train_images,
+        classes=determine_classes(train_images),
         output_path=model_path,
-        validation_images=validation_records,
-        test_images=test_records,
+        validation_images=validation_images,
+        test_images=test_images,
         image_size=image_size,
-        thresholds=thresholds,
+        crop_to_aspect_ratio=crop_to_aspect_ratio,
+        backbone=backbone,
+        weights=weights,
+        class_weighting=False,
+        batch_size=batch_size,
         frozen_backbone_epochs=frozen_backbone_epochs,
+        unfrozen_backbone_layers=unfrozen_backbone_layers,
+        learning_rate=learning_rate,
+        head_dropout=head_dropout,
+        head_l2=head_l2,
+        reduce_lr_patience=reduce_lr_patience,
+        reduce_lr_factor=reduce_lr_factor,
+        min_learning_rate=min_learning_rate,
         # monitor_metric="precision",
         evaluation_dir=evaluation_dir,
-        class_weighting=False,
+        evaluation_thresholds=evaluation_thresholds,
         force=force,
     )
 

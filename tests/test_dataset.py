@@ -9,9 +9,9 @@ from geophototagger.custom import classifier
 from geophototagger.custom.classifier import calculate_class_weights
 from geophototagger.custom.dataset import (
     ImageRecord,
+    determine_classes,
     discover_records,
     encode_labels,
-    determine_classes,
     read_manifest,
     write_manifest,
 )
@@ -55,13 +55,27 @@ def _configure_fake_predictor(
 ):
     model_path = tmp_path / "model.keras"
     model_path.with_suffix(".json").write_text(
-        json.dumps({"labels": ["maize", "manure"], "image_size": [8, 8]}),
+        json.dumps(
+            {
+                "labels": ["maize", "manure"],
+                "image_size": [8, 8],
+                "crop_to_aspect_ratio": True,
+            }
+        ),
         encoding="utf-8",
     )
     load_calls = []
 
     class FakeDataset:
-        def __init__(self, records, _image_size, batch_size: int, **_kwargs) -> None:
+        def __init__(
+            self,
+            records,
+            _image_size,
+            batch_size: int,
+            crop_to_aspect_ratio: bool,
+            **_kwargs,
+        ) -> None:
+            assert crop_to_aspect_ratio
             self.records = records
             self.batch_size = batch_size
 
@@ -115,6 +129,325 @@ def _configure_fake_predictor(
         classifier, "_make_image_sequence_class", lambda _keras: FakeDataset
     )
     return model_path, model, load_calls
+
+
+def test_load_image_batch_crops_to_aspect_ratio_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load_options = []
+
+    def load_img(_path, *, target_size, keep_aspect_ratio):
+        load_options.append(
+            {"target_size": target_size, "keep_aspect_ratio": keep_aspect_ratio}
+        )
+        return "image"
+
+    keras = SimpleNamespace(
+        utils=SimpleNamespace(load_img=load_img, img_to_array=lambda _image: [1])
+    )
+    monkeypatch.setattr(classifier, "_keras", lambda: keras)
+    record = ImageRecord(Path("image.jpg"), ())
+
+    classifier._load_image_batch([record], (8, 8))
+    classifier._load_image_batch([record], (8, 8), crop_to_aspect_ratio=False)
+
+    assert load_options == [
+        {"target_size": (8, 8), "keep_aspect_ratio": True},
+        {"target_size": (8, 8), "keep_aspect_ratio": False},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("layer_count", "expected_trainable_count"),
+    [(0, 0), (20, 20), (80, 60), (0.1, 6), (1.0, 60)],
+)
+def test_unfreeze_top_backbone_layers_uses_configured_count(
+    layer_count: int | float, expected_trainable_count: int
+) -> None:
+    class FakeLayer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.trainable = False
+
+    class FakeFeatureExtractor:
+        def __init__(self, layer_count: int) -> None:
+            self.layers = [FakeLayer(f"layer_{index}") for index in range(layer_count)]
+            self._trainable = False
+
+        @property
+        def trainable(self) -> bool:
+            return self._trainable
+
+        @trainable.setter
+        def trainable(self, value: bool) -> None:
+            self._trainable = value
+            for layer in self.layers:
+                layer.trainable = value
+
+    feature_extractor = FakeFeatureExtractor(60)
+
+    classifier._unfreeze_top_backbone_layers(feature_extractor, layer_count=layer_count)
+
+    assert feature_extractor.trainable is bool(layer_count)
+    assert sum(layer.trainable for layer in feature_extractor.layers) == (
+        expected_trainable_count
+    )
+
+
+def test_unfreeze_top_backbone_layers_defaults_to_ten_percent() -> None:
+    feature_extractor = SimpleNamespace(
+        layers=[
+            SimpleNamespace(name=f"layer_{index}", trainable=True)
+            for index in range(60)
+        ],
+        trainable=False,
+    )
+
+    classifier._unfreeze_top_backbone_layers(feature_extractor)
+
+    assert sum(layer.trainable for layer in feature_extractor.layers) == 6
+
+
+@pytest.mark.parametrize("layer_count", [-0.1, 1.1])
+def test_unfreeze_top_backbone_layers_rejects_invalid_fraction(
+    layer_count: float,
+) -> None:
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        classifier._unfreeze_top_backbone_layers(
+            SimpleNamespace(layers=[]), layer_count
+        )
+
+
+@pytest.mark.parametrize(
+    ("expand_to_blocks", "expected_trainable"),
+    [
+        (True, [False, False, False, True, True, True, True]),
+        (False, [False, False, False, False, True, True, True]),
+    ],
+)
+def test_unfreeze_top_backbone_layers_can_toggle_block_expansion(
+    expand_to_blocks: bool, expected_trainable: list[bool]
+) -> None:
+    class FakeLayer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.trainable = False
+
+    class FakeFeatureExtractor:
+        def __init__(self, names: list[str]) -> None:
+            self.layers = [FakeLayer(name) for name in names]
+            self._trainable = False
+
+        @property
+        def trainable(self) -> bool:
+            return self._trainable
+
+        @trainable.setter
+        def trainable(self, value: bool) -> None:
+            self._trainable = value
+            for layer in self.layers:
+                layer.trainable = value
+
+    feature_extractor = FakeFeatureExtractor(
+        [
+            "stem_conv",
+            "block6l_expand_conv",
+            "block6l_add",
+            "block6m_expand_conv",
+            "block6m_project_conv",
+            "block6m_add",
+            "top_conv",
+        ]
+    )
+
+    if expand_to_blocks:
+        classifier._unfreeze_top_backbone_layers(feature_extractor, layer_count=3)
+    else:
+        classifier._unfreeze_top_backbone_layers(
+            feature_extractor, layer_count=3, expand_to_blocks=False
+        )
+
+    assert [layer.trainable for layer in feature_extractor.layers] == expected_trainable
+
+
+@pytest.mark.parametrize(
+    ("head_dropout", "head_l2", "expected_regularizer"),
+    [(0.5, 0.005, ("l2", 0.005)), (0.0, 0.0, None)],
+)
+def test_build_model_configures_head_regularization(
+    monkeypatch: pytest.MonkeyPatch,
+    head_dropout: float,
+    head_l2: float,
+    expected_regularizer: tuple[str, float] | None,
+) -> None:
+    layer_configuration = {}
+
+    class FakeLayer:
+        def __init__(self, kind: str, **kwargs) -> None:
+            self.kind = kind
+            self.kwargs = kwargs
+
+        def __call__(self, inputs):
+            return self.kind, inputs
+
+    class FakeBackbone:
+        def __init__(self) -> None:
+            self.layers = []
+
+        def __call__(self, _inputs, *, training: bool):
+            assert training is False
+            return "features"
+
+    def make_dense(class_count: int, activation: str, kernel_regularizer):
+        layer_configuration["dense"] = {
+            "class_count": class_count,
+            "activation": activation,
+            "kernel_regularizer": kernel_regularizer,
+        }
+        return FakeLayer("dense")
+
+    layers = SimpleNamespace(
+        Dense=make_dense,
+        Dropout=lambda rate, name: FakeLayer("dropout", rate=rate, name=name),
+    )
+    keras = SimpleNamespace(
+        applications=SimpleNamespace(FakeBackbone=lambda **_kwargs: FakeBackbone()),
+        Input=lambda **_kwargs: "input",
+        layers=layers,
+        Model=lambda inputs, outputs: SimpleNamespace(inputs=inputs, outputs=outputs),
+        regularizers=SimpleNamespace(L2=lambda value: ("l2", value)),
+    )
+    monkeypatch.setattr(classifier, "_keras", lambda: keras)
+    compile_options = {}
+
+    def fake_compile(_keras, _model, *, learning_rate):
+        compile_options["learning_rate"] = learning_rate
+
+    monkeypatch.setattr(classifier, "_compile_model", fake_compile)
+
+    model = classifier.build_model(
+        2,
+        backbone="FakeBackbone",
+        weights=None,
+        augment=False,
+        head_dropout=head_dropout,
+        head_l2=head_l2,
+    )
+
+    assert layer_configuration["dense"]["class_count"] == 2
+    assert layer_configuration["dense"]["activation"] == "sigmoid"
+    assert layer_configuration["dense"]["kernel_regularizer"] == expected_regularizer
+    assert compile_options["learning_rate"] == 1e-3
+    if head_dropout:
+        assert model.outputs[0] == "dense"
+        assert model.outputs[1][0] == "dropout"
+    else:
+        assert model.outputs == ("dense", "features")
+
+
+@pytest.mark.parametrize("layer_count", [24, 0.1])
+def test_train_model_forwards_finetuning_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    layer_count: int | float,
+) -> None:
+    record = ImageRecord(tmp_path / "training.jpg", ("maize",))
+    model = object()
+    fit_kwargs = {}
+
+    def fake_fit_model(*_args, **kwargs):
+        fit_kwargs.update(kwargs)
+        return model
+
+    monkeypatch.setattr(classifier, "_fit_model", fake_fit_model)
+
+    returned_model = classifier.train_model(
+        [record],
+        ["maize"],
+        tmp_path / "model.keras",
+        unfrozen_backbone_layers=layer_count,
+        crop_to_aspect_ratio=False,
+        learning_rate=5e-4,
+        head_dropout=0.35,
+        head_l2=0.002,
+        reduce_lr_patience=4,
+        reduce_lr_factor=0.3,
+        min_learning_rate=1e-7,
+    )
+
+    assert returned_model is model
+    assert fit_kwargs["unfrozen_backbone_layers"] == layer_count
+    assert fit_kwargs["crop_to_aspect_ratio"] is False
+    assert fit_kwargs["learning_rate"] == 5e-4
+    assert fit_kwargs["head_dropout"] == 0.35
+    assert fit_kwargs["head_l2"] == 0.002
+    assert fit_kwargs["reduce_lr_patience"] == 4
+    assert fit_kwargs["reduce_lr_factor"] == 0.3
+    assert fit_kwargs["min_learning_rate"] == 1e-7
+
+
+@pytest.mark.parametrize(
+    ("stored_crop_setting", "expected_crop_setting"),
+    [(True, True), (None, False)],
+)
+def test_predict_image_uses_crop_setting_from_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored_crop_setting: bool | None,
+    expected_crop_setting: bool,
+) -> None:
+    model_path = tmp_path / "model.keras"
+    metadata = {"labels": ["maize"], "image_size": [8, 8]}
+    if stored_crop_setting is not None:
+        metadata["crop_to_aspect_ratio"] = stored_crop_setting
+    model_path.with_suffix(".json").write_text(json.dumps(metadata), encoding="utf-8")
+    model = SimpleNamespace(predict=lambda _images, **_kwargs: [[0.8]])
+    keras = SimpleNamespace(models=SimpleNamespace(load_model=lambda _path: model))
+    prediction_options = {}
+    monkeypatch.setattr(classifier, "_keras", lambda: keras)
+
+    def load_images(_records, image_size, *, crop_to_aspect_ratio):
+        prediction_options["image_size"] = image_size
+        prediction_options["crop_to_aspect_ratio"] = crop_to_aspect_ratio
+        return "image batch"
+
+    monkeypatch.setattr(classifier, "_load_images", load_images)
+
+    predictions = classifier.predict_image(model_path, tmp_path / "photo.jpg")
+
+    assert predictions == {"maize": 0.8}
+    assert prediction_options == {
+        "image_size": (8, 8),
+        "crop_to_aspect_ratio": expected_crop_setting,
+    }
+
+
+def test_reduce_lr_callback_uses_configured_plateau_settings() -> None:
+    callback_options = {}
+
+    def make_reduce_lr_on_plateau(**kwargs):
+        callback_options.update(kwargs)
+        return object()
+
+    keras = SimpleNamespace(
+        callbacks=SimpleNamespace(ReduceLROnPlateau=make_reduce_lr_on_plateau)
+    )
+
+    classifier._make_reduce_lr_callback(
+        keras,
+        monitor="val_loss",
+        factor=0.2,
+        patience=3,
+        min_learning_rate=1e-6,
+    )
+
+    assert callback_options == {
+        "monitor": "val_loss",
+        "factor": 0.2,
+        "patience": 3,
+        "min_lr": 1e-6,
+        "verbose": 1,
+    }
 
 
 def test_manifest_discovers_images_and_ignores_artifacts(tmp_path: Path) -> None:
@@ -606,7 +939,7 @@ def test_existing_model_skips_training_and_still_writes_reports(
         validation_images=[validation_record],
         test_images=[test_record],
         evaluation_dir=tmp_path / "reports",
-        thresholds=(0.5, 0.7),
+        evaluation_thresholds=(0.5, 0.7),
     )
 
     assert returned_model is model

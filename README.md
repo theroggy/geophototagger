@@ -40,29 +40,36 @@ and `logs` directories.
 
 ## Train
 
-Train a frozen pretrained EfficientNetV2 baseline and save the model plus its
-label metadata:
+Train the configured multilabel EfficientNetV2 classifier and save the model
+plus its label and training metadata:
 
-Edit the constants at the top of [run_training.py](run_training.py), then run:
+Edit the paths and settings in
+[run_maizemulch_train.py](scripts/run_maizemulch_train.py), then run:
 
 ```powershell
-python run_training.py
+python scripts/run_maizemulch_train.py
 ```
 
-Training enables random horizontal flips, small rotations, zoom, and contrast
-changes by default. These transformations are active only during training and
-are disabled automatically during prediction. Set `AUGMENT = False` in the
-script for a controlled comparison run.
+The training API defaults to five frozen-backbone epochs, then fine-tunes the
+last 10% of backbone layers (rounded up and expanded to whole blocks). Its
+classification head applies Dropout at 0.5 and
+L2 kernel regularization at 0.005 by default; the script exposes these values
+as local settings. Set either regularization value to zero to disable it.
+When the monitored loss or metric plateaus for three epochs, training reduces
+the learning rate by a factor of 0.2, down to a minimum of `1e-6`. The initial
+learning rate defaults to `1e-3` and can be changed in the training script.
+Input images are center-cropped to the target aspect ratio by default, which
+preserves geometry but can trim edges. Set `crop_to_aspect_ratio = False` in the
+training script to stretch images instead.
 
-Balanced positive and negative class weighting is also enabled by default. This
-gives rare labels more influence during binary cross-entropy training. Use
-`CLASS_WEIGHTING = False` in the script for an unweighted comparison run.
+Random horizontal flips, rotations, zoom, contrast, and brightness are enabled
+by default during training. Class weighting is disabled by default.
 
 Validation uses the separate validation directory directly; it is not sampled
 from the training directory.
 
 The default `imagenet` weights may require network access on the first run. For
-an offline smoke test, set `WEIGHTS = None` in the script.
+an offline smoke test, set `weights = None` in the script.
 
 ## Predict
 
@@ -105,6 +112,6 @@ conversion when a classification needs to change.
 
 ## Label whitelist
 
-Set `LABEL_WHITELIST` in [run_training.py](run_training.py) to limit training to
-selected labels. Labels not in the whitelist are removed from multi-label
-images; images with no remaining labels are excluded.
+Set `classes` in [run_maizemulch_train.py](scripts/run_maizemulch_train.py) to
+limit training to selected labels. Labels not in this set are removed from
+multi-label images; images with no remaining labels are excluded.
