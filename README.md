@@ -60,7 +60,11 @@ the learning rate by a factor of 0.2, down to a minimum of `1e-6`. The initial
 learning rate defaults to `1e-3` and can be changed in the training script.
 Input images are center-cropped to the target aspect ratio by default, which
 preserves geometry but can trim edges. Set `crop_to_aspect_ratio = False` in the
-training script to stretch images instead.
+training script to stretch images instead. The `crop_window_scale` setting
+controls how much of the aspect-fitted crop to keep: `1.0` retains the standard
+crop, while `0.75` keeps 75% of each dimension around the center. A tighter crop
+is skipped when its remaining resolution would be smaller than the requested
+image size.
 
 Random horizontal flips, rotations, zoom, contrast, and brightness are enabled
 by default during training. Class weighting is disabled by default.

@@ -1,7 +1,9 @@
 """Keras 3 image tagging with the PyTorch backend.
 
-Defaults for the training configuration are inspired from
-https://www.identifyshell.org/blog-fine-tuning-efficientnetv2-models.php
+Some inspiration for the default training hyperparameters is inspired from:
+- https://www.identifyshell.org/blog-fine-tuning-efficientnetv2-models.php
+- https://keras.io/examples/vision/image_classification_efficientnet_fine_tuning
+
 """
 
 from __future__ import annotations
@@ -11,19 +13,22 @@ import json
 import logging
 import math
 import os
-import shutil
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from PIL import Image, ImageOps
 from tqdm.auto import tqdm
 
 from .dataset import ImageRecord
 
 if TYPE_CHECKING:
     from collections.abc import Collection
+
+logger = logging.getLogger(__name__)
 
 
 def _keras() -> Any:
@@ -39,20 +44,104 @@ def _load_image_batch(
     image_size: tuple[int, int],
     *,
     crop_to_aspect_ratio: bool = True,
+    crop_window_scale: float = 1.0,
 ) -> np.ndarray:
     """Load a batch of images into a single ndarray."""
+    _validate_crop_window_scale(crop_window_scale)
     keras = _keras()
-    images = [
-        keras.utils.img_to_array(
-            keras.utils.load_img(
+    images = []
+    for record in records:
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always")
+            image = _load_img(
                 record.image_path,
-                target_size=image_size,
-                keep_aspect_ratio=crop_to_aspect_ratio,
+                image_size,
+                crop_to_aspect_ratio=crop_to_aspect_ratio,
+                crop_window_scale=crop_window_scale,
             )
-        )
-        for record in records
-    ]
+        for caught_warning in caught_warnings:
+            warnings.warn(
+                f"{record.image_path}: {caught_warning.message}",
+                caught_warning.category,
+                stacklevel=2,
+            )
+        images.append(keras.utils.img_to_array(image))
     return np.array(images)
+
+
+def _load_img(
+    image_path: Path,
+    target_size: tuple[int, int],
+    *,
+    crop_to_aspect_ratio: bool = True,
+    crop_window_scale: float = 1.0,
+) -> Image.Image:
+    """Load an RGB image and resize it to the requested dimensions.
+
+    Args:
+        image_path: Path to the source image.
+        target_size: Output size as ``(height, width)``.
+        crop_to_aspect_ratio: Whether to center-crop the source to the target
+            aspect ratio. If false, resize the entire image and distort its
+            aspect ratio as needed.
+        crop_window_scale: Fraction of the aspect-fitted crop's width and
+            height to retain, in ``(0, 1]``. Values below one apply an extra
+            centered crop when it still leaves at least ``target_size`` pixels
+            in both dimensions. Otherwise, the standard aspect-ratio crop is
+            used. This option has no effect when ``crop_to_aspect_ratio`` is
+            false.
+
+    Returns:
+        The resized RGB image.
+
+    Raises:
+        ValueError: If ``crop_window_scale`` is outside ``(0, 1]``.
+    """
+    _validate_crop_window_scale(crop_window_scale)
+    target_height, target_width = target_size
+    with Image.open(image_path) as opened_image:
+        image = ImageOps.exif_transpose(opened_image).convert("RGB")
+    if crop_to_aspect_ratio:
+        image_width, image_height = image.size
+        target_ratio = target_width / target_height
+        if image_width / image_height > target_ratio:
+            crop_width = int(image_height * target_ratio)
+            crop_height = image_height
+        else:
+            crop_width = image_width
+            crop_height = int(image_width / target_ratio)
+
+        if crop_window_scale < 1:
+            tighter_width = int(crop_width * crop_window_scale)
+            tighter_height = int(crop_height * crop_window_scale)
+            if tighter_width >= target_width and tighter_height >= target_height:
+                crop_width = tighter_width
+                crop_height = tighter_height
+
+        left = (image_width - crop_width) // 2
+        top = (image_height - crop_height) // 2
+        image = image.crop((left, top, left + crop_width, top + crop_height))
+
+    return image.resize(
+        (target_width, target_height), resample=Image.Resampling.NEAREST
+    )
+
+
+def _validate_crop_window_scale(crop_window_scale: float) -> None:
+    if (
+        isinstance(crop_window_scale, bool)
+        or not isinstance(crop_window_scale, (int, float))
+        or not math.isfinite(crop_window_scale)
+        or not 0 < crop_window_scale <= 1
+    ):
+        raise ValueError("crop_window_scale must be greater than 0 and at most 1")
+
+
+def _crop_window_scale_from_metadata(metadata: dict[str, Any]) -> float:
+    if "crop_window_scale" in metadata:
+        return metadata["crop_window_scale"]
+    legacy_crop_percent = metadata.get("aspect_ratio_crop_percent", 0.0)
+    return 1.0 - legacy_crop_percent / 100
 
 
 def _load_images(
@@ -60,11 +149,15 @@ def _load_images(
     image_size: tuple[int, int],
     *,
     crop_to_aspect_ratio: bool = True,
+    crop_window_scale: float = 1.0,
 ) -> Any:
     keras = _keras()
     return keras.ops.convert_to_tensor(
         _load_image_batch(
-            records, image_size, crop_to_aspect_ratio=crop_to_aspect_ratio
+            records,
+            image_size,
+            crop_to_aspect_ratio=crop_to_aspect_ratio,
+            crop_window_scale=crop_window_scale,
         )
     )
 
@@ -81,6 +174,7 @@ def _make_image_sequence_class(keras: Any) -> type:
             labels: np.ndarray | None = None,
             sample_weights: np.ndarray | None = None,
             crop_to_aspect_ratio: bool = True,
+            crop_window_scale: float = 1.0,
             batch_size: int = 32,
             shuffle: bool = False,
             **kwargs: Any,
@@ -91,6 +185,7 @@ def _make_image_sequence_class(keras: Any) -> type:
             self.labels = labels
             self.sample_weights = sample_weights
             self.crop_to_aspect_ratio = crop_to_aspect_ratio
+            self.crop_window_scale = crop_window_scale
             self.batch_size = batch_size
             self.shuffle = shuffle
             self.indices = np.arange(len(records))
@@ -107,6 +202,7 @@ def _make_image_sequence_class(keras: Any) -> type:
                 [self.records[i] for i in batch_indices],
                 self.image_size,
                 crop_to_aspect_ratio=self.crop_to_aspect_ratio,
+                crop_window_scale=self.crop_window_scale,
             )
             if self.labels is None:
                 return batch_images
@@ -214,6 +310,8 @@ def write_prediction_report(
         for label in classes
     }
     correctly_classified_count = 0
+    output_dir_ok = output_dir.parent / f"{output_dir.name}_ok"
+    output_dir_ok.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "prediction-results.csv"
     with report_path.open("w", encoding="utf-8", newline="") as report_file:
         writer = csv.DictWriter(
@@ -227,7 +325,7 @@ def write_prediction_report(
             ],
         )
         writer.writeheader()
-        for record in records:
+        for record in tqdm(records, desc="Write evaluation", unit="image"):
             path_key = str(record.image_path.resolve())
             predicted_probabilities = predictions_by_path[path_key]
             predicted_labels = {
@@ -260,20 +358,30 @@ def write_prediction_report(
                     },
                 }
             )
-            if not correctly_classified:
-                shutil.copy2(record.image_path, output_dir / record.image_path.name)
-                (output_dir / f"{record.image_path.stem}.json").write_text(
-                    json.dumps(
-                        {
-                            "image": str(record.image_path),
-                            "expected_labels": list(record.labels),
-                            "predicted_labels": sorted(predicted_labels),
-                            "probabilities": predicted_probabilities,
-                        },
-                        indent=2,
-                    ),
-                    encoding="utf-8",
-                )
+
+            # Copy the image and write the JSON metadata to the appropriate output
+            # directory based on classification correctness.
+            if correctly_classified:
+                dst_path = output_dir_ok / record.image_path.name
+                json_dst_path = output_dir_ok / f"{record.image_path.stem}.json"
+            else:
+                dst_path = output_dir / record.image_path.name
+                json_dst_path = output_dir / f"{record.image_path.stem}.json"
+
+            if not dst_path.exists():
+                os.link(record.image_path, dst_path)
+            json_dst_path.write_text(
+                json.dumps(
+                    {
+                        "image": str(record.image_path),
+                        "expected_labels": list(record.labels),
+                        "predicted_labels": sorted(predicted_labels),
+                        "probabilities": predicted_probabilities,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
 
     label_metrics = {}
     record_count = len(records)
@@ -361,6 +469,31 @@ def _make_reduce_lr_callback(
         min_lr=min_learning_rate,
         verbose=1,
     )
+
+
+def _make_best_model_metrics_callback(keras: Any, checkpoint: Any) -> Any:
+    """Capture epoch metrics whenever the checkpoint saves a new best model."""
+
+    class _BestModelMetricsCallback(keras.callbacks.Callback):
+        def __init__(self) -> None:
+            super().__init__()
+            self._previous_best = checkpoint.best
+            self.metrics: dict[str, float] | None = None
+            self.epoch: int | None = None
+
+        def on_epoch_end(self, epoch: int, logs: dict[str, Any] | None = None) -> None:
+            current_best = checkpoint.best
+            if current_best == self._previous_best:
+                return
+            self._previous_best = current_best
+            self.metrics = {
+                name: float(value)
+                for name, value in (logs or {}).items()
+                if value is not None and math.isfinite(float(value))
+            }
+            self.epoch = epoch + 1
+
+    return _BestModelMetricsCallback()
 
 
 def _build_model(
@@ -510,7 +643,7 @@ def _unfreeze_top_backbone_layers(
     layer_count: int | float = 0.1,
     *,
     expand_to_blocks: bool = True,
-) -> None:
+) -> int:
     """Unfreeze final layers by count or fraction, optionally expanding blocks.
 
     Keeping each block's layers trainable or frozen together avoids fine-tuning
@@ -525,7 +658,8 @@ def _unfreeze_top_backbone_layers(
         layer_count = math.ceil(len(layers) * layer_count)
     if not layer_count:
         feature_extractor.trainable = False
-        return
+        return 0
+
     feature_extractor.trainable = True
     first_trainable_layer = max(0, len(layers) - layer_count)
     if expand_to_blocks:
@@ -539,6 +673,16 @@ def _unfreeze_top_backbone_layers(
                 first_trainable_layer = min(first_trainable_layer, index)
     for index, layer in enumerate(layers):
         layer.trainable = index >= first_trainable_layer
+    actual_layer_count = sum(layer.trainable for layer in layers)
+
+    if expand_to_blocks:
+        logging.info(
+            "Unfroze %d of %d backbone layers",
+            actual_layer_count,
+            len(layers),
+        )
+
+    return actual_layer_count
 
 
 def _validate_unfrozen_backbone_layers(layer_count: int | float) -> None:
@@ -562,6 +706,7 @@ def _fit_model(
     validation_records: list[ImageRecord],
     image_size: tuple[int, int],
     crop_to_aspect_ratio: bool,
+    crop_window_scale: float,
     backbone: str,
     weights: str | None,
     epochs: int,
@@ -591,6 +736,8 @@ def _fit_model(
         image_size: Height and width used when loading images.
         crop_to_aspect_ratio: Whether to center-crop images to the target aspect
             ratio before resizing, rather than stretch them.
+        crop_window_scale: Fraction of each aspect-fitted crop dimension to keep.
+            Values below one tighten the centered crop when resolution permits.
         backbone: Keras Applications backbone name.
         weights: Initial backbone weights, or ``None``.
         epochs: Total training epochs.
@@ -649,6 +796,7 @@ def _fit_model(
             image_size,
             labels=validation_labels,
             crop_to_aspect_ratio=crop_to_aspect_ratio,
+            crop_window_scale=crop_window_scale,
             batch_size=batch_size,
             **dataset_kwargs,
         )
@@ -663,6 +811,7 @@ def _fit_model(
         labels=train_labels,
         sample_weights=sample_weights,
         crop_to_aspect_ratio=crop_to_aspect_ratio,
+        crop_window_scale=crop_window_scale,
         batch_size=batch_size,
         shuffle=True,
         **dataset_kwargs,
@@ -680,19 +829,17 @@ def _fit_model(
     fit_kwargs: dict[str, Any] = {"epochs": epochs}
     if validation_dataset is not None:
         fit_kwargs["validation_data"] = validation_dataset
-    monitor = (
-        monitor_metric
-        if validation_dataset is None or monitor_metric.startswith("val_")
-        else f"val_{monitor_metric}"
+    checkpoint = keras.callbacks.ModelCheckpoint(
+        output_path, monitor=monitor_metric, save_best_only=True, verbose=1
     )
+    best_model_metrics_callback = _make_best_model_metrics_callback(keras, checkpoint)
     callbacks: list[Any] = [
         _make_csv_logger(keras, output_path.with_suffix(".csv"), append=True),
-        keras.callbacks.ModelCheckpoint(
-            output_path, monitor=monitor, save_best_only=True
-        ),
+        checkpoint,
+        best_model_metrics_callback,
         _make_reduce_lr_callback(
             keras,
-            monitor=monitor,
+            monitor=monitor_metric,
             factor=reduce_lr_factor,
             patience=reduce_lr_patience,
             min_learning_rate=min_learning_rate,
@@ -701,7 +848,7 @@ def _fit_model(
     if early_stopping_patience:
         callbacks.append(
             keras.callbacks.EarlyStopping(
-                monitor=monitor,
+                monitor=monitor_metric,
                 patience=early_stopping_patience,
                 restore_best_weights=True,
                 verbose=1,
@@ -709,19 +856,25 @@ def _fit_model(
         )
     fit_kwargs["callbacks"] = callbacks
 
+    actual_unfrozen_backbone_layers = 0
     frozen_epochs = min(epochs, frozen_epochs)
     if frozen_epochs:
         fit_kwargs["epochs"] = frozen_epochs
         model.fit(train_dataset, **fit_kwargs)
     if frozen_epochs < epochs:
         logging.info("Unfreezing the feature extractor after %d epochs", frozen_epochs)
-        _unfreeze_top_backbone_layers(
+        actual_unfrozen_backbone_layers = _unfreeze_top_backbone_layers(
             feature_extractor, layer_count=unfrozen_backbone_layers
         )
         _compile_model(keras, model, learning_rate=learning_rate)
         fit_kwargs["initial_epoch"] = frozen_epochs
         fit_kwargs["epochs"] = epochs
         model.fit(train_dataset, **fit_kwargs)
+
+    logger.info(
+        f"Best model was {best_model_metrics_callback.epoch=} "
+        f"with {best_model_metrics_callback.metrics=}"
+    )
     model = keras.models.load_model(output_path)
     metadata_path = output_path.with_suffix(".json")
     metadata_path.write_text(
@@ -730,20 +883,24 @@ def _fit_model(
                 "labels": classes,
                 "image_size": list(image_size),
                 "crop_to_aspect_ratio": crop_to_aspect_ratio,
+                "crop_window_scale": crop_window_scale,
                 "backbone": backbone,
                 "threshold": 0.5,
                 "augmentation": augment,
                 "class_weighting": class_weighting,
                 "class_weights": class_weights,
                 "unfrozen_backbone_layers": unfrozen_backbone_layers,
+                "actual_unfrozen_backbone_layers": actual_unfrozen_backbone_layers,
                 "head_dropout": head_dropout,
                 "head_l2": head_l2,
                 "learning_rate": learning_rate,
                 "reduce_lr_patience": reduce_lr_patience,
                 "reduce_lr_factor": reduce_lr_factor,
                 "min_learning_rate": min_learning_rate,
+                "best_model_epoch": best_model_metrics_callback.epoch,
+                "best_model_metrics": best_model_metrics_callback.metrics,
             },
-            indent=2,
+            indent=4,
         ),
         encoding="utf-8",
     )
@@ -756,12 +913,12 @@ def train_model(
     output_path: Path,
     *,
     validation_images: list[ImageRecord] | None = None,
-    test_images: list[ImageRecord] | None = None,
     image_size: tuple[int, int] = (224, 224),
     crop_to_aspect_ratio: bool = True,
+    crop_window_scale: float = 1.0,
     backbone: str = "EfficientNetV2S",
     weights: str | None = "imagenet",
-    epochs: int = 30,
+    epochs: int = 50,
     validation_split: float = 0.0,
     seed: int = 42,
     frozen_backbone_epochs: int = 5,
@@ -771,13 +928,11 @@ def train_model(
     head_dropout: float = 0.5,
     head_l2: float = 0.005,
     class_weighting: bool = False,
-    early_stopping_patience: int = 10,
-    reduce_lr_patience: int = 3,
+    early_stopping_patience: int = 20,
+    reduce_lr_patience: int = 5,
     reduce_lr_factor: float = 0.2,
     min_learning_rate: float = 1e-6,
-    monitor_metric: str = "loss",
-    evaluation_dir: Path | None = None,
-    evaluation_thresholds: Collection[float] = (0.5,),
+    monitor_metric: str = "val_loss",
     batch_size: int = 32,
     workers: int = 4,
     force: bool = False,
@@ -790,12 +945,13 @@ def train_model(
         output_path: Destination for the saved Keras model.
         validation_images: Optional explicit validation records. When set,
             ``validation_split`` must be zero.
-        test_images: Optional held-out records used only to collect
-            misclassified images; never used for training or validation.
         image_size: Height and width used when loading images.
         crop_to_aspect_ratio: Center-crop images to the target aspect ratio,
             preserving geometry but possibly trimming edges. Set to ``False``
             to stretch images to the target dimensions.
+        crop_window_scale: Fraction of each aspect-fitted crop dimension to
+            keep. Values below one tighten the centered crop when resolution
+            permits; ``1.0`` keeps the standard aspect-ratio crop.
         backbone: Name of the Keras Applications backbone.
         weights: Backbone weights, typically ``"imagenet"`` or ``None``.
         epochs: Number of training epochs.
@@ -822,14 +978,7 @@ def train_model(
             evaluate early stopping, e.g. ``"loss"``, ``"binary_accuracy"``,
             ``"precision"`` or ``"recall"``. A ``val_`` prefix is added
             automatically when validation data is available.
-        evaluation_dir: Optional directory where evaluation information is written.
-            The evaluation information includes various artifacts, like a summary of
-            evaluation metrics and directories with copies of all misclassified images.
-        evaluation_thresholds: List of thresholds to report classification performance
-            at in the evaluation reports. Only relevant if ``evaluation_dir`` is
-            specified.
-        batch_size: Number of images loaded into memory per training or
-            prediction batch.
+        batch_size: Number of images loaded into memory per training batch.
         workers: Number of background threads used to load image batches
             ahead of time while the model trains. Set to zero to load
             synchronously on the main thread.
@@ -847,6 +996,7 @@ def train_model(
         raise ValueError("Cannot train without image records")
     if frozen_backbone_epochs < 0:
         raise ValueError("frozen_backbone_epochs must not be negative")
+    _validate_crop_window_scale(crop_window_scale)
     _validate_unfrozen_backbone_layers(unfrozen_backbone_layers)
     _validate_learning_rate(learning_rate)
     if reduce_lr_patience < 0:
@@ -856,13 +1006,6 @@ def train_model(
     if min_learning_rate < 0:
         raise ValueError("min_learning_rate must not be negative")
     _validate_head_regularization(head_dropout, head_l2)
-    evaluation_thresholds = tuple(evaluation_thresholds)
-    if not evaluation_thresholds:
-        raise ValueError("At least one prediction threshold is required")
-    if len(set(evaluation_thresholds)) != len(evaluation_thresholds) or not all(
-        0 <= threshold <= 1 for threshold in evaluation_thresholds
-    ):
-        raise ValueError("Prediction thresholds must be unique values between 0 and 1")
     if (validation_images is not None and validation_split) or (
         validation_images and not validation_split == 0.0
     ):
@@ -891,6 +1034,7 @@ def train_model(
             validation_records=validation_records_for_reporting,
             image_size=image_size,
             crop_to_aspect_ratio=crop_to_aspect_ratio,
+            crop_window_scale=crop_window_scale,
             backbone=backbone,
             weights=weights,
             epochs=epochs,
@@ -911,22 +1055,6 @@ def train_model(
             workers=workers,
         )
 
-    if evaluation_dir is not None:
-        for split_name, split_records in (
-            ("train", train_images),
-            ("validation", validation_records_for_reporting),
-            ("test", test_images or []),
-        ):
-            if not split_records:
-                continue
-            predict_images(
-                output_path,
-                split_records,
-                batch_size=batch_size,
-                workers=workers,
-                output_dir=evaluation_dir / f"{split_name}_wrong",
-                thresholds=evaluation_thresholds,
-            )
     return model
 
 
@@ -1028,6 +1156,7 @@ def predict_images(
     metadata = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
     image_size = tuple(metadata["image_size"])
     crop_to_aspect_ratio = metadata.get("crop_to_aspect_ratio", False)
+    crop_window_scale = _crop_window_scale_from_metadata(metadata)
     labels = metadata["labels"]
     input_is_record = [
         isinstance(image_path, ImageRecord) for image_path in image_paths
@@ -1043,6 +1172,7 @@ def predict_images(
         or not all(0 <= threshold <= 1 for threshold in thresholds)
     ):
         raise ValueError("Thresholds must be unique values between 0 and 1")
+
     records = [
         image_path
         if isinstance(image_path, ImageRecord)
@@ -1085,6 +1215,7 @@ def predict_images(
         pending_records,
         image_size,
         crop_to_aspect_ratio=crop_to_aspect_ratio,
+        crop_window_scale=crop_window_scale,
         batch_size=batch_size,
     )
     output_context = (
@@ -1098,9 +1229,7 @@ def predict_images(
             if output_file is not None
             else None
         )
-        with tqdm(
-            total=len(pending_records), desc="Predicting", unit="image"
-        ) as progress:
+        with tqdm(total=len(pending_records), desc="Predict", unit="image") as progress:
             for batch_index, batch_images in enumerate(
                 _iter_prediction_batches(dataset, workers)
             ):
@@ -1144,6 +1273,7 @@ def predict_images(
         _write_prediction_reports(
             records, labels, cached_predictions, output_dir, thresholds
         )
+
     return predictions
 
 
@@ -1201,12 +1331,14 @@ def predict_image(model_path: Path, image_path: Path) -> dict[str, float]:
     metadata = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
     image_size = tuple(metadata["image_size"])
     crop_to_aspect_ratio = metadata.get("crop_to_aspect_ratio", False)
+    crop_window_scale = _crop_window_scale_from_metadata(metadata)
     keras = _keras()
     model = keras.models.load_model(model_path)
     image = _load_images(
         [ImageRecord(image_path, ())],
         image_size,
         crop_to_aspect_ratio=crop_to_aspect_ratio,
+        crop_window_scale=crop_window_scale,
     )
     logging.info("Predicting %s", image_path)
     probabilities = model.predict(image, verbose=0)[0]

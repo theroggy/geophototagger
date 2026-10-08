@@ -1,9 +1,12 @@
 import csv
 import json
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from PIL import Image
 
 from geophototagger.custom import classifier
 from geophototagger.custom.classifier import calculate_class_weights
@@ -22,8 +25,11 @@ def fake_progress(monkeypatch: pytest.MonkeyPatch):
     progress_instances = []
 
     class FakeProgress:
-        def __init__(self, total: int, **_kwargs) -> None:
-            self.total = total
+        def __init__(
+            self, iterable=None, *, total: int | None = None, **_kwargs
+        ) -> None:
+            self.iterable = iterable
+            self.total = total if total is not None else len(iterable)
             self.n = 0
             self.closed = False
             progress_instances.append(self)
@@ -36,6 +42,14 @@ def fake_progress(monkeypatch: pytest.MonkeyPatch):
 
         def update(self, amount: int) -> None:
             self.n += amount
+
+        def __iter__(self):
+            try:
+                for item in self.iterable:
+                    self.update(1)
+                    yield item
+            finally:
+                self.close()
 
         def close(self) -> None:
             self.closed = True
@@ -136,25 +150,112 @@ def test_load_image_batch_crops_to_aspect_ratio_by_default(
 ) -> None:
     load_options = []
 
-    def load_img(_path, *, target_size, keep_aspect_ratio):
+    def load_img(
+        _path,
+        _target_size,
+        *,
+        crop_to_aspect_ratio,
+        crop_window_scale,
+    ):
         load_options.append(
-            {"target_size": target_size, "keep_aspect_ratio": keep_aspect_ratio}
+            {
+                "crop_to_aspect_ratio": crop_to_aspect_ratio,
+                "crop_window_scale": crop_window_scale,
+            }
         )
         return "image"
 
-    keras = SimpleNamespace(
-        utils=SimpleNamespace(load_img=load_img, img_to_array=lambda _image: [1])
-    )
+    keras = SimpleNamespace(utils=SimpleNamespace(img_to_array=lambda _image: [1]))
     monkeypatch.setattr(classifier, "_keras", lambda: keras)
+    monkeypatch.setattr(classifier, "_load_img", load_img)
     record = ImageRecord(Path("image.jpg"), ())
 
     classifier._load_image_batch([record], (8, 8))
     classifier._load_image_batch([record], (8, 8), crop_to_aspect_ratio=False)
 
     assert load_options == [
-        {"target_size": (8, 8), "keep_aspect_ratio": True},
-        {"target_size": (8, 8), "keep_aspect_ratio": False},
+        {"crop_to_aspect_ratio": True, "crop_window_scale": 1.0},
+        {"crop_to_aspect_ratio": False, "crop_window_scale": 1.0},
     ]
+
+
+def test_load_image_batch_reemits_warnings_with_filename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = ImageRecord(Path("oversized.jpg"), ())
+
+    def load_img(
+        _path,
+        _target_size,
+        *,
+        crop_to_aspect_ratio,
+        crop_window_scale,
+    ):
+        del crop_to_aspect_ratio
+        del crop_window_scale
+        warnings.warn("oversized image", Image.DecompressionBombWarning, stacklevel=2)
+        warnings.warn("unrelated image warning", UserWarning, stacklevel=2)
+        return "image"
+
+    keras = SimpleNamespace(utils=SimpleNamespace(img_to_array=lambda _image: [1]))
+    monkeypatch.setattr(classifier, "_keras", lambda: keras)
+    monkeypatch.setattr(classifier, "_load_img", load_img)
+
+    with pytest.warns(Warning) as caught_warnings:
+        classifier._load_image_batch([record], (8, 8))
+
+    assert [warning.category for warning in caught_warnings] == [
+        Image.DecompressionBombWarning,
+        UserWarning,
+    ]
+    assert [str(warning.message) for warning in caught_warnings] == [
+        "oversized.jpg: oversized image",
+        "oversized.jpg: unrelated image warning",
+    ]
+
+
+def test_load_image_batch_applies_additional_center_crop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image_path = tmp_path / "gradient.png"
+    source = np.zeros((120, 200, 3), dtype=np.uint8)
+    source[:, :, 0] = np.arange(200, dtype=np.uint8)
+    Image.fromarray(source).save(image_path)
+    keras = SimpleNamespace(utils=SimpleNamespace(img_to_array=np.asarray))
+    monkeypatch.setattr(classifier, "_keras", lambda: keras)
+    record = ImageRecord(image_path, ())
+
+    standard_crop = classifier._load_image_batch([record], (40, 40))
+    tighter_crop = classifier._load_image_batch(
+        [record], (40, 40), crop_window_scale=0.75
+    )
+
+    assert standard_crop.shape == tighter_crop.shape == (1, 40, 40, 3)
+    assert standard_crop[0, 0, 0, 0] == 41
+    assert tighter_crop[0, 0, 0, 0] == 56
+
+
+def test_load_image_batch_skips_additional_crop_below_output_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image_path = tmp_path / "small.png"
+    Image.new("RGB", (60, 60)).save(image_path)
+    keras = SimpleNamespace(utils=SimpleNamespace(img_to_array=np.asarray))
+    monkeypatch.setattr(classifier, "_keras", lambda: keras)
+
+    images = classifier._load_image_batch(
+        [ImageRecord(image_path, ())],
+        (40, 40),
+        crop_window_scale=0.5,
+    )
+
+    assert images.shape == (1, 40, 40, 3)
+
+
+@pytest.mark.parametrize("crop_scale", [0, -0.1, 1.1, float("inf"), float("nan")])
+def test_load_image_batch_rejects_invalid_crop_scale(crop_scale: float) -> None:
+    with pytest.raises(ValueError, match="crop_window_scale"):
+        classifier._load_image_batch([], (40, 40), crop_window_scale=crop_scale)
 
 
 @pytest.mark.parametrize(
@@ -186,9 +287,12 @@ def test_unfreeze_top_backbone_layers_uses_configured_count(
 
     feature_extractor = FakeFeatureExtractor(60)
 
-    classifier._unfreeze_top_backbone_layers(feature_extractor, layer_count=layer_count)
+    actual_trainable_count = classifier._unfreeze_top_backbone_layers(
+        feature_extractor, layer_count=layer_count
+    )
 
     assert feature_extractor.trainable is bool(layer_count)
+    assert actual_trainable_count == expected_trainable_count
     assert sum(layer.trainable for layer in feature_extractor.layers) == (
         expected_trainable_count
     )
@@ -226,7 +330,9 @@ def test_unfreeze_top_backbone_layers_rejects_invalid_fraction(
     ],
 )
 def test_unfreeze_top_backbone_layers_can_toggle_block_expansion(
-    expand_to_blocks: bool, expected_trainable: list[bool]
+    expand_to_blocks: bool,
+    expected_trainable: list[bool],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     class FakeLayer:
         def __init__(self, name: str) -> None:
@@ -260,14 +366,22 @@ def test_unfreeze_top_backbone_layers_can_toggle_block_expansion(
         ]
     )
 
+    caplog.set_level("INFO")
     if expand_to_blocks:
-        classifier._unfreeze_top_backbone_layers(feature_extractor, layer_count=3)
+        actual_trainable_count = classifier._unfreeze_top_backbone_layers(
+            feature_extractor, layer_count=3
+        )
     else:
-        classifier._unfreeze_top_backbone_layers(
+        actual_trainable_count = classifier._unfreeze_top_backbone_layers(
             feature_extractor, layer_count=3, expand_to_blocks=False
         )
 
     assert [layer.trainable for layer in feature_extractor.layers] == expected_trainable
+    assert actual_trainable_count == sum(expected_trainable)
+    if expand_to_blocks:
+        assert "Unfroze 4 of 7 backbone layers" in caplog.text
+    else:
+        assert "Unfroze" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -367,6 +481,7 @@ def test_train_model_forwards_finetuning_settings(
         tmp_path / "model.keras",
         unfrozen_backbone_layers=layer_count,
         crop_to_aspect_ratio=False,
+        crop_window_scale=0.75,
         learning_rate=5e-4,
         head_dropout=0.35,
         head_l2=0.002,
@@ -378,6 +493,7 @@ def test_train_model_forwards_finetuning_settings(
     assert returned_model is model
     assert fit_kwargs["unfrozen_backbone_layers"] == layer_count
     assert fit_kwargs["crop_to_aspect_ratio"] is False
+    assert fit_kwargs["crop_window_scale"] == 0.75
     assert fit_kwargs["learning_rate"] == 5e-4
     assert fit_kwargs["head_dropout"] == 0.35
     assert fit_kwargs["head_l2"] == 0.002
@@ -387,28 +503,42 @@ def test_train_model_forwards_finetuning_settings(
 
 
 @pytest.mark.parametrize(
-    ("stored_crop_setting", "expected_crop_setting"),
-    [(True, True), (None, False)],
+    "crop_settings",
+    [
+        ({"crop_to_aspect_ratio": True, "crop_window_scale": 0.75}, True, 0.75),
+        (
+            {"crop_to_aspect_ratio": True, "aspect_ratio_crop_percent": 25},
+            True,
+            0.75,
+        ),
+        ({}, False, 1.0),
+    ],
 )
 def test_predict_image_uses_crop_setting_from_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stored_crop_setting: bool | None,
-    expected_crop_setting: bool,
+    crop_settings: tuple[dict[str, bool | float | int], bool, float],
 ) -> None:
+    stored_crop_settings, expected_crop_setting, expected_crop_scale = crop_settings
     model_path = tmp_path / "model.keras"
     metadata = {"labels": ["maize"], "image_size": [8, 8]}
-    if stored_crop_setting is not None:
-        metadata["crop_to_aspect_ratio"] = stored_crop_setting
+    metadata.update(stored_crop_settings)
     model_path.with_suffix(".json").write_text(json.dumps(metadata), encoding="utf-8")
     model = SimpleNamespace(predict=lambda _images, **_kwargs: [[0.8]])
     keras = SimpleNamespace(models=SimpleNamespace(load_model=lambda _path: model))
     prediction_options = {}
     monkeypatch.setattr(classifier, "_keras", lambda: keras)
 
-    def load_images(_records, image_size, *, crop_to_aspect_ratio):
+    def load_images(
+        _records,
+        image_size,
+        *,
+        crop_to_aspect_ratio,
+        crop_window_scale,
+    ):
         prediction_options["image_size"] = image_size
         prediction_options["crop_to_aspect_ratio"] = crop_to_aspect_ratio
+        prediction_options["crop_window_scale"] = crop_window_scale
         return "image batch"
 
     monkeypatch.setattr(classifier, "_load_images", load_images)
@@ -419,6 +549,7 @@ def test_predict_image_uses_crop_setting_from_metadata(
     assert prediction_options == {
         "image_size": (8, 8),
         "crop_to_aspect_ratio": expected_crop_setting,
+        "crop_window_scale": expected_crop_scale,
     }
 
 
@@ -448,6 +579,33 @@ def test_reduce_lr_callback_uses_configured_plateau_settings() -> None:
         "min_lr": 1e-6,
         "verbose": 1,
     }
+
+
+def test_best_model_metrics_follow_checkpoint_improvements() -> None:
+    class FakeCallback:
+        def __init__(self) -> None:
+            pass
+
+    checkpoint = SimpleNamespace(best=1.0)
+    keras = SimpleNamespace(callbacks=SimpleNamespace(Callback=FakeCallback))
+    callback = classifier._make_best_model_metrics_callback(keras, checkpoint)
+
+    callback.on_epoch_end(0, {"loss": 1.2, "val_loss": 1.1})
+    assert callback.metrics is None
+
+    checkpoint.best = 0.9
+    callback.on_epoch_end(1, {"loss": 1.0, "val_loss": 0.9, "val_binary_accuracy": 0.8})
+    assert callback.epoch == 2
+    assert callback.metrics == {
+        "loss": 1.0,
+        "val_loss": 0.9,
+        "val_binary_accuracy": 0.8,
+    }
+
+    checkpoint.best = 0.8
+    callback.on_epoch_end(2, {"loss": 0.7, "val_loss": 0.8})
+    assert callback.epoch == 3
+    assert callback.metrics == {"loss": 0.7, "val_loss": 0.8}
 
 
 def test_manifest_discovers_images_and_ignores_artifacts(tmp_path: Path) -> None:
@@ -609,8 +767,8 @@ def test_predict_images_without_output_path_keeps_existing_return_behavior(
     assert model.full_predict_calls == 0
     assert model.batch_inputs == [["first.jpg"], ["second.jpg"]]
     assert load_calls == [model_path]
-    assert fake_progress[0].n == 2
-    assert fake_progress[0].closed
+    assert all(progress.n == 2 for progress in fake_progress)
+    assert all(progress.closed for progress in fake_progress)
 
 
 def test_predict_images_writes_csv_and_reuses_existing_rows(
@@ -868,6 +1026,7 @@ def test_predict_images_writes_prediction_report(
     assert not (report_dir / "first.jpg").exists()
     assert (report_dir / "second.jpg").exists()
     assert (report_dir / "second.json").exists()
+    assert (output_dir / "threshold-0.5_correctly_classified" / "first.jpg").exists()
     assert predictions == [
         {"maize": 0.9, "manure": 0.1},
         {"maize": 0.8, "manure": 0.2},
@@ -894,6 +1053,26 @@ def test_predict_images_writes_prediction_report(
         "recall": 1.0,
         "f1_score": 2 / 3,
     }
+
+
+def test_write_prediction_report_updates_progress(
+    tmp_path: Path, fake_progress
+) -> None:
+    image_path = tmp_path / "image.jpg"
+    image_path.write_bytes(b"image")
+    record = ImageRecord(image_path, ("maize",))
+
+    classifier.write_prediction_report(
+        [record],
+        ["maize"],
+        {str(image_path.resolve()): {"maize": 0.9}},
+        threshold=0.5,
+        output_dir=tmp_path / "report",
+    )
+
+    assert fake_progress[0].total == 1
+    assert fake_progress[0].n == 1
+    assert fake_progress[0].closed
 
 
 def test_existing_model_skips_training_and_still_writes_reports(
