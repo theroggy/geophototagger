@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from geophototagger.imagenet21k import classify_images
+from phototagger.imagenet21k import classify_images
 
 
 def main() -> None:

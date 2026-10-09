@@ -4,11 +4,11 @@ import json
 import logging
 from pathlib import Path
 
-from geophototagger.custom.classifier import (
+from phototagger.custom.classifier import (
     predict_images,
     write_prediction_evaluation,
 )
-from geophototagger.custom.dataset import discover_records
+from phototagger.custom.dataset import discover_records
 
 
 def main() -> None:
