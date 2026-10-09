@@ -3,13 +3,13 @@
 import logging
 from pathlib import Path
 
-from geophototagger.custom.classifier import (
+from phototagger.custom.classifier import (
     predict_images,
     prediction_evaluation_is_complete,
     train_model,
     write_prediction_evaluation,
 )
-from geophototagger.custom.dataset import (
+from phototagger.custom.dataset import (
     determine_classes,
     discover_records,
     discover_records_csv,

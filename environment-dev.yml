@@ -1,4 +1,4 @@
-name: geophototagger-dev
+name: phototagger-dev
 channels:
   - conda-forge
 dependencies:

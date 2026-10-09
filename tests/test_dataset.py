@@ -8,9 +8,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from geophototagger.custom import classifier
-from geophototagger.custom.classifier import calculate_class_weights
-from geophototagger.custom.dataset import (
+from phototagger.custom import classifier
+from phototagger.custom.classifier import calculate_class_weights
+from phototagger.custom.dataset import (
     ImageRecord,
     determine_classes,
     discover_records,
