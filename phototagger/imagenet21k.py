@@ -12,7 +12,7 @@ from typing import Literal
 from PIL import Image
 from tqdm.auto import tqdm
 
-from geophototagger.custom.dataset import SUPPORTED_IMAGE_SUFFIXES
+from phototagger.custom.dataset import SUPPORTED_IMAGE_SUFFIXES
 
 MODELS = {
     "efficientnetv2": ("tf_efficientnetv2_s.in21k", "imagenet-21k-goog"),

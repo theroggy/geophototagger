@@ -87,6 +87,96 @@ def discover_records(
     return records
 
 
+def discover_records_csv(
+    csv_path: Path,
+    image_path_column: str,
+    classes_column: str,
+    image_dir: Path,
+    label_whitelist: Collection[str] | None = None,
+    *,
+    include_unmatched_as_negative: bool = True,
+) -> list[ImageRecord]:
+    """Discover image records from a CSV containing paths and classes.
+
+    Relative image paths are resolved against ``image_dir``. Class values may
+    contain multiple labels separated by ``LABEL_SEPARATOR``.
+
+    Args:
+        csv_path: CSV containing image paths and class labels.
+        image_path_column: Name of the CSV column containing image paths.
+        classes_column: Name of the CSV column containing class labels.
+        image_dir: Directory used to resolve relative image paths.
+        label_whitelist: Optional labels to retain. Images with no retained
+            labels are excluded, unless ``include_unmatched_as_negative`` is set.
+        include_unmatched_as_negative: When ``label_whitelist`` is set, keep
+            images with no whitelisted label as explicit negative examples
+            (an empty label tuple) instead of dropping them.
+
+    Returns:
+        Image records sorted by their resolved image path.
+
+    Raises:
+        ValueError: If ``image_dir`` is not a directory, a required column is
+            missing, a CSV row has no image path, or a referenced image is
+            missing.
+    """
+    if not image_dir.is_dir():
+        raise ValueError(f"Image directory does not exist: {image_dir}")
+
+    allowed_labels = (
+        {label.strip() for label in label_whitelist if label.strip()}
+        if label_whitelist is not None
+        else None
+    )
+    records = []
+    with csv_path.open(encoding="utf-8-sig", newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
+        required_columns = {image_path_column, classes_column}
+        if not required_columns.issubset(reader.fieldnames or []):
+            raise ValueError(f"CSV must contain columns {sorted(required_columns)}")
+
+        for row_number, row in enumerate(reader, start=2):
+            raw_image_path = (row.get(image_path_column) or "").strip()
+            if not raw_image_path:
+                raise ValueError(f"CSV row {row_number} must contain an image path")
+            image_path = Path(raw_image_path)
+            if not image_path.is_absolute():
+                image_path = image_dir / image_path
+            if image_path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
+                continue
+            if not image_path.is_file():
+                logging.warning(
+                    "CSV row %s references missing image; skipping: %s",
+                    row_number,
+                    image_path,
+                )
+                continue
+
+            raw_labels = (row.get(classes_column) or "").strip()
+            labels = tuple(
+                sorted(
+                    {
+                        label.strip()
+                        for label in raw_labels.split(LABEL_SEPARATOR)
+                        if label.strip()
+                    }
+                )
+            )
+            if allowed_labels is None:
+                if labels:
+                    records.append(ImageRecord(image_path.resolve(), labels))
+                continue
+            matched_labels = set(labels) & allowed_labels
+            if matched_labels:
+                records.append(
+                    ImageRecord(image_path.resolve(), tuple(sorted(matched_labels)))
+                )
+            elif include_unmatched_as_negative:
+                records.append(ImageRecord(image_path.resolve(), ()))
+
+    return sorted(records, key=lambda record: record.image_path)
+
+
 def write_manifest(
     dataset_root: Path,
     manifest_path: Path,
