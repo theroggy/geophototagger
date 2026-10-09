@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from geophototagger import imagenet21k
+from phototagger import imagenet21k
 from scripts import run_imagenet_classify as script
 
 

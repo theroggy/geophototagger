@@ -4,26 +4,32 @@ import json
 import logging
 from pathlib import Path
 
-from geophototagger.custom.classifier import predict_images
-from geophototagger.custom.dataset import discover_records
+from phototagger.custom.classifier import (
+    predict_images,
+    write_prediction_evaluation,
+)
+from phototagger.custom.dataset import discover_records
 
 
 def main() -> None:
     """Predict a labeled directory and write threshold-specific reports."""
     base_dir = Path("Q:/phototagger/trainingdata_raw")
     input_dirs = [
+        base_dir / "varia/test",
+        base_dir / "varia/test_extra",
+        base_dir / "korrelmais/agrilens_korrelmais_2023",
+        base_dir / "korrelmais/agrilens_korrelmais_2024",
         base_dir / "korrelmais/agrilens_korrelmais_2025",
         base_dir / "stalmest/agrilens_stalmest_2025",
-        base_dir / "varia/test_extra",
         base_dir / "grasklaver/images",
     ]
 
     project = "maizemulch"
-    version = "03.large"
+    version = "04-b1"
     project_dir = Path(f"X:/Monitoring/phototagger/{project}")
     model_path = project_dir / "models" / f"phototagger-{project}_{version}.keras"
 
-    thresholds = (0.5, 0.6, 0.7, 0.8)
+    thresholds = (0.5, 0.6)
     batch_size = 12
     workers = 4
 
@@ -48,13 +54,23 @@ def main() -> None:
         logging.info(
             "Writing prediction reports and misclassified images to %s", output_dir
         )
-        predict_images(
+        predictions = predict_images(
             model_path,
             records,
             batch_size=batch_size,
             workers=workers,
-            output_dir=output_dir,
-            thresholds=thresholds,
+            output_path=output_dir / "predictions.csv",
+        )
+        predictions_by_path = {
+            str(record.image_path.resolve()): prediction
+            for record, prediction in zip(records, predictions, strict=True)
+        }
+        write_prediction_evaluation(
+            records,
+            vocabulary,
+            predictions_by_path,
+            output_dir,
+            thresholds,
         )
 
 

@@ -3,13 +3,13 @@ from pathlib import Path
 
 
 def read_config(config_files: list[Path] | None = None) -> dict:
-    """Read and validate layered geophototagger configuration files.
+    """Read and validate layered phototagger configuration files.
 
     Following configuration files will be loaded. Parameters of the last file where they
     are defined will override the previous ones:
 
     - The defaults in the installation.
-    - If there is a geophototagger file in the users home directory, it will be loaded
+    - If there is a phototagger file in the users home directory, it will be loaded
       next.
     - Finally any additional configuration files passed will be loaded.
 
@@ -29,10 +29,10 @@ def read_config(config_files: list[Path] | None = None) -> dict:
     config_files_all = []
 
     # The defaults in the installation should be loaded first
-    config_files_all.append(Path(__file__).parent / "geophototagger.ini")
+    config_files_all.append(Path(__file__).parent / "phototagger.ini")
 
     # If there is a user config file, load it next
-    user_config_path = Path.home() / ".geophototagger.ini"
+    user_config_path = Path.home() / ".phototagger.ini"
     if user_config_path.exists():
         config_files_all.append(user_config_path)
     if config_files is not None:
