@@ -53,12 +53,17 @@ def _load_image_batch(
     for record in records:
         with warnings.catch_warnings(record=True) as caught_warnings:
             warnings.simplefilter("always")
-            image = _load_img(
-                record.image_path,
-                image_size,
-                crop_to_aspect_ratio=crop_to_aspect_ratio,
-                crop_window_scale=crop_window_scale,
-            )
+            try:
+                image = _load_img(
+                    record.image_path,
+                    image_size,
+                    crop_to_aspect_ratio=crop_to_aspect_ratio,
+                    crop_window_scale=crop_window_scale,
+                )
+            except OSError as error:
+                raise OSError(
+                    f"Failed to load image {record.image_path}: {error}"
+                ) from error
         for caught_warning in caught_warnings:
             warnings.warn(
                 f"{record.image_path}: {caught_warning.message}",
@@ -290,7 +295,7 @@ def _prediction_progress_callback(
     )
 
 
-def write_prediction_report(
+def write_prediction_evaluation_info(
     records: list[ImageRecord],
     classes: list[str],
     predictions_by_path: dict[str, dict[str, float]],
@@ -298,7 +303,7 @@ def write_prediction_report(
     threshold: float,
     output_dir: Path,
 ) -> None:
-    """Write a complete report for one classification threshold."""
+    """Write an evaluation information for one classification threshold."""
     output_dir.mkdir(parents=True, exist_ok=True)
     label_statistics = {
         label: {
@@ -325,7 +330,7 @@ def write_prediction_report(
             ],
         )
         writer.writeheader()
-        for record in tqdm(records, desc="Write evaluation", unit="image"):
+        for record in tqdm(records, desc=f"Create eval dir {threshold}", unit="image"):
             path_key = str(record.image_path.resolve())
             predicted_probabilities = predictions_by_path[path_key]
             predicted_labels = {
@@ -918,12 +923,12 @@ def train_model(
     crop_window_scale: float = 1.0,
     backbone: str = "EfficientNetV2S",
     weights: str | None = "imagenet",
-    epochs: int = 50,
+    epochs: int = 100,
     validation_split: float = 0.0,
     seed: int = 42,
     frozen_backbone_epochs: int = 5,
     augment: bool = True,
-    unfrozen_backbone_layers: int | float = 0.1,
+    unfrozen_backbone_layers: int | float = 0.15,
     learning_rate: float = 1e-3,
     head_dropout: float = 0.5,
     head_l2: float = 0.005,
@@ -1128,11 +1133,9 @@ def predict_images(
     image_paths: list[Path] | list[ImageRecord],
     batch_size: int = 12,
     workers: int = 4,
-    output_dir: Path | None = None,
-    *,
-    thresholds: Collection[float] = (0.5,),
+    output_path: Path | None = None,
 ) -> list[dict[str, float]]:
-    """Predict batches, saving results and reports under one output directory.
+    """Predict batches, optionally writing probabilities to a CSV file.
 
     Args:
         model_path: Saved Keras model path with adjacent JSON metadata.
@@ -1140,38 +1143,21 @@ def predict_images(
         batch_size: Number of images loaded and predicted per batch.
         workers: Number of background threads used to load batches ahead of
             prediction. Set to zero to load synchronously.
-        output_dir: Optional destination for ``predictions.csv`` and the
-            threshold-specific report directories. Existing rows are reused by
-            resolved image path.
-        thresholds: Unique probability thresholds in [0, 1] for reports. Used
-            when labeled records and ``output_dir`` are provided.
+        output_path: Optional path for the prediction CSV. Existing rows are
+            reused by resolved image path; new predictions are staged in a
+            sibling ``_busy.csv`` file until prediction completes.
 
     Returns:
         One label-to-probability mapping per input image, in input order.
 
     Raises:
-        ValueError: If the prediction CSV is malformed, input paths and records
-            are mixed while reports are requested, or thresholds are invalid.
+        ValueError: If the prediction CSV is malformed.
     """
     metadata = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
     image_size = tuple(metadata["image_size"])
     crop_to_aspect_ratio = metadata.get("crop_to_aspect_ratio", False)
     crop_window_scale = _crop_window_scale_from_metadata(metadata)
     labels = metadata["labels"]
-    input_is_record = [
-        isinstance(image_path, ImageRecord) for image_path in image_paths
-    ]
-    if output_dir is not None and any(input_is_record) and not all(input_is_record):
-        raise ValueError("Use either ImageRecord values or image paths, not both")
-    write_reports = (
-        bool(image_paths) and all(input_is_record) and output_dir is not None
-    )
-    if write_reports and (
-        not thresholds
-        or len(set(thresholds)) != len(thresholds)
-        or not all(0 <= threshold <= 1 for threshold in thresholds)
-    ):
-        raise ValueError("Thresholds must be unique values between 0 and 1")
 
     records = [
         image_path
@@ -1179,13 +1165,24 @@ def predict_images(
         else ImageRecord(image_path, ())
         for image_path in image_paths
     ]
-    prediction_path = output_dir / "predictions.csv" if output_dir is not None else None
-    cached_predictions = (
-        _read_prediction_cache(prediction_path, labels)
-        if prediction_path is not None and prediction_path.exists()
-        else {}
-    )
     input_keys = [str(record.image_path.resolve()) for record in records]
+
+    busy_path = (
+        output_path.with_stem(f"{output_path.stem}_busy")
+        if output_path is not None
+        else None
+    )
+    cached_predictions: dict[str, dict[str, float]] = {}
+
+    if output_path is not None and output_path.exists():
+        ready_predictions = _read_prediction_cache(output_path, labels)
+        if all(key in ready_predictions for key in input_keys):
+            return [dict(ready_predictions[key]) for key in input_keys]
+        cached_predictions.update(ready_predictions)
+
+    if busy_path is not None and busy_path.exists():
+        cached_predictions.update(_read_prediction_cache(busy_path, labels))
+
     pending_records = []
     pending_keys = []
     seen_keys = set(cached_predictions)
@@ -1196,17 +1193,22 @@ def predict_images(
             seen_keys.add(image_key)
 
     fieldnames = ["image_path", *(f"{label}_probability" for label in labels)]
-    if prediction_path is not None and not prediction_path.exists():
-        prediction_path.parent.mkdir(parents=True, exist_ok=True)
-        with prediction_path.open("w", encoding="utf-8", newline="") as output_file:
-            csv.DictWriter(output_file, fieldnames=fieldnames).writeheader()
-    if not pending_records:
-        predictions = [dict(cached_predictions[key]) for key in input_keys]
-        if write_reports and output_dir is not None and records:
-            _write_prediction_reports(
-                records, labels, cached_predictions, output_dir, thresholds
+    if busy_path is not None:
+        busy_path.parent.mkdir(parents=True, exist_ok=True)
+        with busy_path.open("w", encoding="utf-8", newline="") as output_file:
+            writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(
+                {
+                    "image_path": image_key,
+                    **{f"{label}_probability": predictions[label] for label in labels},
+                }
+                for image_key, predictions in cached_predictions.items()
             )
-        return predictions
+    if not pending_records:
+        if busy_path is not None and output_path is not None:
+            busy_path.replace(output_path)
+        return [dict(cached_predictions[key]) for key in input_keys]
 
     keras = _keras()
     model = keras.models.load_model(model_path)
@@ -1219,8 +1221,8 @@ def predict_images(
         batch_size=batch_size,
     )
     output_context = (
-        prediction_path.open("a", encoding="utf-8", newline="")
-        if prediction_path is not None
+        busy_path.open("a", encoding="utf-8", newline="")
+        if busy_path is not None
         else nullcontext(None)
     )
     with output_context as output_file:
@@ -1268,25 +1270,60 @@ def predict_images(
                     writer.writerows(rows)
                     output_file.flush()
                 progress.update(batch_count)
-    predictions = [dict(cached_predictions[key]) for key in input_keys]
-    if write_reports and output_dir is not None and records:
-        _write_prediction_reports(
-            records, labels, cached_predictions, output_dir, thresholds
-        )
 
+    if busy_path is not None and output_path is not None:
+        busy_path.replace(output_path)
+
+    predictions = [dict(cached_predictions[key]) for key in input_keys]
     return predictions
 
 
-def _write_prediction_reports(
+def prediction_evaluation_is_complete(
+    output_dir: Path, thresholds: Collection[float]
+) -> bool:
+    """Return whether all threshold-specific evaluation reports are complete."""
+    if (
+        not thresholds
+        or len(set(thresholds)) != len(thresholds)
+        or not all(0 <= threshold <= 1 for threshold in thresholds)
+    ):
+        return False
+
+    return all(
+        (report_dir / "prediction-results.csv").is_file()
+        and (report_dir / "prediction-statistics.json").is_file()
+        for report_dir in (
+            output_dir / f"threshold-{threshold:g}" for threshold in thresholds
+        )
+    )
+
+
+def write_prediction_evaluation(
     records: list[ImageRecord],
     classes: list[str],
-    predictions_by_path: dict[str, dict[str, float]],
+    predictions_by_path: dict[str, dict[str, float]] | Path,
     output_dir: Path,
     thresholds: Collection[float] = (0.5,),
 ) -> None:
-    """Write any missing reports using probabilities already in memory."""
+    """Write information that makes it possible to evaluate the predictions.
+
+    Args:
+        records: Labeled images to include in the reports.
+        classes: Model classes, in prediction-column order.
+        predictions_by_path: Predictions keyed by resolved image path, or a CSV
+            file containing predictions in the format written by
+            ``predict_images``.
+        output_dir: Base directory for threshold-specific reports.
+        thresholds: Unique probability thresholds in [0, 1].
+
+    Raises:
+        ValueError: If thresholds are invalid, a record has no prediction, or a
+            record contains a label outside ``classes``.
+    """
     if not records:
         return
+    if isinstance(predictions_by_path, Path):
+        predictions_by_path = _read_prediction_cache(predictions_by_path, classes)
     if (
         not thresholds
         or len(set(thresholds)) != len(thresholds)
@@ -1309,7 +1346,7 @@ def _write_prediction_reports(
         statistics_path = report_dir / "prediction-statistics.json"
         if report_path.exists() and statistics_path.exists():
             continue
-        write_prediction_report(
+        write_prediction_evaluation_info(
             records,
             classes,
             predictions_by_path,
