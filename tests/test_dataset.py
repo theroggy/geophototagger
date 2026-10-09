@@ -14,6 +14,7 @@ from geophototagger.custom.dataset import (
     ImageRecord,
     determine_classes,
     discover_records,
+    discover_records_csv,
     encode_labels,
     read_manifest,
     write_manifest,
@@ -212,6 +213,25 @@ def test_load_image_batch_reemits_warnings_with_filename(
         "oversized.jpg: oversized image",
         "oversized.jpg: unrelated image warning",
     ]
+
+
+def test_load_image_batch_includes_path_in_image_load_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = Path("corrupt.jpg")
+    keras = SimpleNamespace(utils=SimpleNamespace(img_to_array=np.asarray))
+    monkeypatch.setattr(classifier, "_keras", lambda: keras)
+
+    def load_img(*_args, **_kwargs):
+        raise OSError("image file is truncated (19 bytes not processed)")
+
+    monkeypatch.setattr(classifier, "_load_img", load_img)
+
+    with pytest.raises(
+        OSError,
+        match=r"Failed to load image corrupt\.jpg: image file is truncated",
+    ):
+        classifier._load_image_batch([ImageRecord(image_path, ())], (8, 8))
 
 
 def test_load_image_batch_applies_additional_center_crop(
@@ -672,6 +692,57 @@ def test_discover_records_reads_formatted_flat_names(tmp_path: Path) -> None:
     assert records[0].labels == ("fake", "korrelmais")
 
 
+def test_discover_records_csv_reads_relative_paths_and_labels(tmp_path: Path) -> None:
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    (image_dir / "second.JPG").write_bytes(b"image")
+    (image_dir / "first.jpg").write_bytes(b"image")
+    csv_path = tmp_path / "overview.csv"
+    csv_path.write_text(
+        "image,type\nsecond.JPG,bufet; raai;bufet\nfirst.jpg,raai\n",
+        encoding="utf-8",
+    )
+
+    records = discover_records_csv(csv_path, "image", "type", image_dir)
+
+    assert [record.image_path.name for record in records] == ["first.jpg", "second.JPG"]
+    assert [record.labels for record in records] == [("raai",), ("bufet", "raai")]
+
+    filtered_records = discover_records_csv(
+        csv_path, "image", "type", image_dir, label_whitelist={"bufet"}
+    )
+    assert [record.labels for record in filtered_records] == [(), ("bufet",)]
+
+    matched_records = discover_records_csv(
+        csv_path,
+        "image",
+        "type",
+        image_dir,
+        label_whitelist={"bufet"},
+        include_unmatched_as_negative=False,
+    )
+    assert [record.labels for record in matched_records] == [("bufet",)]
+
+
+def test_discover_records_csv_rejects_missing_columns_and_skips_missing_images(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    csv_path = tmp_path / "overview.csv"
+    csv_path.write_text("filename,type\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="CSV must contain columns"):
+        discover_records_csv(csv_path, "image", "type", image_dir)
+
+    csv_path.write_text("image,type\nmissing.jpg,bufet\n", encoding="utf-8")
+    records = discover_records_csv(csv_path, "image", "type", image_dir)
+
+    assert records == []
+    assert "CSV row 2 references missing image; skipping:" in caplog.text
+    assert str(image_dir / "missing.jpg") in caplog.text
+
+
 def test_whitelist_filters_labels_and_drops_unmatched_images(tmp_path: Path) -> None:
     (tmp_path / "stem__fake-korrelmais.png").write_bytes(b"image")
     (tmp_path / "stem2__stalmest.png").write_bytes(b"image")
@@ -771,6 +842,32 @@ def test_predict_images_without_output_path_keeps_existing_return_behavior(
     assert all(progress.closed for progress in fake_progress)
 
 
+def test_predict_images_reuses_complete_ready_prediction_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_progress,
+) -> None:
+    model_path, _model, load_calls = _configure_fake_predictor(
+        monkeypatch, tmp_path, {"first.jpg": [0.9, 0.1]}
+    )
+    image_path = tmp_path / "first.jpg"
+    output_dir = tmp_path / "results"
+    output_dir.mkdir()
+    (output_dir / "predictions.csv").write_text(
+        "image_path,maize_probability,manure_probability\n"
+        f"{image_path.resolve()},0.9,0.1\n",
+        encoding="utf-8",
+    )
+
+    predictions = classifier.predict_images(
+        model_path, [image_path], output_path=output_dir / "predictions.csv"
+    )
+
+    assert predictions == [{"maize": 0.9, "manure": 0.1}]
+    assert load_calls == []
+    assert fake_progress == []
+
+
 def test_predict_images_writes_csv_and_reuses_existing_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -793,7 +890,7 @@ def test_predict_images_writes_csv_and_reuses_existing_rows(
         [first_image, second_image, first_image],
         batch_size=1,
         workers=2,
-        output_dir=output_dir,
+        output_path=prediction_path,
     )
 
     assert predictions == [
@@ -824,7 +921,7 @@ def test_predict_images_writes_csv_and_reuses_existing_rows(
     resumed_predictions = classifier.predict_images(
         model_path,
         [second_image, first_image],
-        output_dir=output_dir,
+        output_path=prediction_path,
         workers=0,
     )
     assert resumed_predictions == [predictions[1], predictions[0]]
@@ -848,6 +945,13 @@ def test_predict_images_resumes_after_a_later_batch_fails(
     image_paths = [tmp_path / name for name in probabilities]
     output_dir = tmp_path / "predictions"
     prediction_path = output_dir / "predictions.csv"
+    output_dir.mkdir()
+    prediction_path.write_text(
+        "image_path,maize_probability,manure_probability\n"
+        f"{(tmp_path / 'cached.jpg').resolve()},0.4,0.6\n",
+        encoding="utf-8",
+    )
+    original_prediction_csv = prediction_path.read_text(encoding="utf-8")
     model.fail_on_batch_call = 2
 
     with pytest.raises(RuntimeError, match="simulated batch failure"):
@@ -856,12 +960,18 @@ def test_predict_images_resumes_after_a_later_batch_fails(
             image_paths,
             batch_size=1,
             workers=0,
-            output_dir=output_dir,
+            output_path=prediction_path,
         )
 
-    with prediction_path.open(encoding="utf-8", newline="") as output_file:
+    busy_path = output_dir / "predictions_busy.csv"
+    assert prediction_path.read_text(encoding="utf-8") == original_prediction_csv
+    assert busy_path.is_file()
+    with busy_path.open(encoding="utf-8", newline="") as output_file:
         saved_rows = list(csv.DictReader(output_file))
-    assert [row["image_path"] for row in saved_rows] == [str(image_paths[0].resolve())]
+    assert [row["image_path"] for row in saved_rows] == [
+        str((tmp_path / "cached.jpg").resolve()),
+        str(image_paths[0].resolve()),
+    ]
 
     model.fail_on_batch_call = None
     predictions = classifier.predict_images(
@@ -869,7 +979,7 @@ def test_predict_images_resumes_after_a_later_batch_fails(
         image_paths,
         batch_size=1,
         workers=0,
-        output_dir=output_dir,
+        output_path=prediction_path,
     )
 
     assert predictions == [
@@ -884,6 +994,8 @@ def test_predict_images_resumes_after_a_later_batch_fails(
         ["third.jpg"],
     ]
     assert all(progress.closed for progress in fake_progress)
+    assert prediction_path.is_file()
+    assert not busy_path.exists()
 
 
 @pytest.mark.parametrize(
@@ -924,7 +1036,7 @@ def test_predict_images_rejects_invalid_existing_csv(
         classifier.predict_images(
             model_path,
             [tmp_path / "photo.jpg"],
-            output_dir=output_dir,
+            output_path=prediction_path,
             workers=0,
         )
 
@@ -939,13 +1051,16 @@ def test_predict_images_empty_input_writes_header_without_loading_model(
         monkeypatch, tmp_path, {}
     )
     output_dir = tmp_path / "predictions"
+    prediction_path = output_dir / "predictions.csv"
 
     assert (
-        classifier.predict_images(model_path, [], output_dir=output_dir, workers=0)
+        classifier.predict_images(
+            model_path, [], output_path=prediction_path, workers=0
+        )
         == []
     )
 
-    assert (output_dir / "predictions.csv").read_text(encoding="utf-8") == (
+    assert prediction_path.read_text(encoding="utf-8") == (
         "image_path,maize_probability,manure_probability\n"
     )
     assert load_calls == []
@@ -988,17 +1103,24 @@ def test_predict_images_writes_prediction_report(
     ]
 
     output_dir = tmp_path / "report"
+    prediction_path = output_dir / "predictions.csv"
     predictions = classifier.predict_images(
         model_path,
         records,
         batch_size=1,
         workers=0,
-        output_dir=output_dir,
-        thresholds=(0.5, 0.7),
+        output_path=prediction_path,
     )
 
-    prediction_path = output_dir / "predictions.csv"
     assert prediction_path.is_file()
+    assert not (output_dir / "threshold-0.5").exists()
+    classifier.write_prediction_evaluation(
+        records,
+        ["maize", "manure"],
+        prediction_path,
+        output_dir,
+        thresholds=(0.5, 0.7),
+    )
     report_dir = output_dir / "threshold-0.5"
     with (report_dir / "prediction-results.csv").open(
         encoding="utf-8", newline=""
@@ -1062,7 +1184,7 @@ def test_write_prediction_report_updates_progress(
     image_path.write_bytes(b"image")
     record = ImageRecord(image_path, ("maize",))
 
-    classifier.write_prediction_report(
+    classifier.write_prediction_evaluation_info(
         [record],
         ["maize"],
         {str(image_path.resolve()): {"maize": 0.9}},
@@ -1073,6 +1195,32 @@ def test_write_prediction_report_updates_progress(
     assert fake_progress[0].total == 1
     assert fake_progress[0].n == 1
     assert fake_progress[0].closed
+
+
+def test_write_prediction_evaluation_reads_prediction_csv(tmp_path: Path) -> None:
+    image_path = tmp_path / "image.jpg"
+    image_path.write_bytes(b"image")
+    record = ImageRecord(image_path, ("maize",))
+    predictions_path = tmp_path / "predictions.csv"
+    predictions_path.write_text(
+        f"image_path,maize_probability\n{image_path.resolve()},0.9\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "evaluation"
+    assert not classifier.prediction_evaluation_is_complete(output_dir, (0.5,))
+
+    classifier.write_prediction_evaluation(
+        [record], ["maize"], predictions_path, output_dir, thresholds=(0.5,)
+    )
+    assert classifier.prediction_evaluation_is_complete(output_dir, (0.5,))
+    assert not classifier.prediction_evaluation_is_complete(output_dir, (0.5, 0.7))
+
+    with (output_dir / "threshold-0.5" / "prediction-results.csv").open(
+        encoding="utf-8", newline=""
+    ) as report_file:
+        rows = list(csv.DictReader(report_file))
+    assert rows[0]["predicted_labels"] == "maize"
+    assert rows[0]["correctly_classified"] == "True"
 
 
 def test_existing_model_skips_training_and_still_writes_reports(

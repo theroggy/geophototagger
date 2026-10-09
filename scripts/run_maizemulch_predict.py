@@ -4,7 +4,10 @@ import json
 import logging
 from pathlib import Path
 
-from geophototagger.custom.classifier import predict_images
+from geophototagger.custom.classifier import (
+    predict_images,
+    write_prediction_evaluation,
+)
 from geophototagger.custom.dataset import discover_records
 
 
@@ -51,13 +54,23 @@ def main() -> None:
         logging.info(
             "Writing prediction reports and misclassified images to %s", output_dir
         )
-        predict_images(
+        predictions = predict_images(
             model_path,
             records,
             batch_size=batch_size,
             workers=workers,
-            output_dir=output_dir,
-            thresholds=thresholds,
+            output_path=output_dir / "predictions.csv",
+        )
+        predictions_by_path = {
+            str(record.image_path.resolve()): prediction
+            for record, prediction in zip(records, predictions, strict=True)
+        }
+        write_prediction_evaluation(
+            records,
+            vocabulary,
+            predictions_by_path,
+            output_dir,
+            thresholds,
         )
 
 
