@@ -105,7 +105,7 @@ def _configure_fake_predictor(
 
     class FakeModel:
         def __init__(self) -> None:
-            self.batch_inputs = []
+            self.batch_inputs: list[list[str]] = []
             self.full_predict_calls = 0
             self.fail_on_batch_call = None
             self.on_batch = None
@@ -426,7 +426,7 @@ def test_build_model_configures_head_regularization(
 
     class FakeBackbone:
         def __init__(self) -> None:
-            self.layers = []
+            self.layers: list[object] = []
 
         def __call__(self, _inputs, *, training: bool):
             assert training is False
@@ -1148,7 +1148,7 @@ def test_predict_images_writes_prediction_report(
     assert not (report_dir / "first.jpg").exists()
     assert (report_dir / "second.jpg").exists()
     assert (report_dir / "second.json").exists()
-    assert (output_dir / "threshold-0.5_correctly_classified" / "first.jpg").exists()
+    assert (output_dir / "threshold-0.5_ok" / "first.jpg").exists()
     assert predictions == [
         {"maize": 0.9, "manure": 0.1},
         {"maize": 0.8, "manure": 0.2},
@@ -1223,16 +1223,14 @@ def test_write_prediction_evaluation_reads_prediction_csv(tmp_path: Path) -> Non
     assert rows[0]["correctly_classified"] == "True"
 
 
-def test_existing_model_skips_training_and_still_writes_reports(
+def test_existing_model_skips_training(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model_path = tmp_path / "model.keras"
     model_path.write_bytes(b"model")
     training_record = ImageRecord(tmp_path / "training.jpg", ("maize",))
     validation_record = ImageRecord(tmp_path / "validation.jpg", ("maize",))
-    test_record = ImageRecord(tmp_path / "test.jpg", ("maize",))
     model = object()
-    reports = []
 
     monkeypatch.setattr(
         classifier,
@@ -1244,55 +1242,12 @@ def test_existing_model_skips_training_and_still_writes_reports(
         "_fit_model",
         lambda *_args, **_kwargs: pytest.fail("Existing models must not be trained"),
     )
-    monkeypatch.setattr(
-        classifier,
-        "predict_images",
-        lambda reported_model_path, reported_records, **kwargs: reports.append(
-            (
-                reported_model_path,
-                reported_records,
-                kwargs["output_dir"],
-                kwargs["batch_size"],
-                kwargs["workers"],
-                kwargs["thresholds"],
-            )
-        ),
-    )
 
     returned_model = classifier.train_model(
         [training_record],
         ["maize"],
         model_path,
         validation_images=[validation_record],
-        test_images=[test_record],
-        evaluation_dir=tmp_path / "reports",
-        evaluation_thresholds=(0.5, 0.7),
     )
 
     assert returned_model is model
-    assert reports == [
-        (
-            model_path,
-            [training_record],
-            tmp_path / "reports" / "train_wrong",
-            32,
-            4,
-            (0.5, 0.7),
-        ),
-        (
-            model_path,
-            [validation_record],
-            tmp_path / "reports" / "validation_wrong",
-            32,
-            4,
-            (0.5, 0.7),
-        ),
-        (
-            model_path,
-            [test_record],
-            tmp_path / "reports" / "test_wrong",
-            32,
-            4,
-            (0.5, 0.7),
-        ),
-    ]
