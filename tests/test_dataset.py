@@ -1159,7 +1159,7 @@ def test_predict_images_writes_prediction_report(
         output_dir,
         thresholds=(0.5, 0.7),
     )
-    with (output_dir / "prediction-results_0.5.csv").open(
+    with (output_dir / "prediction-report_0.5.csv").open(
         encoding="utf-8", newline=""
     ) as report_file:
         rows = list(csv.DictReader(report_file))
@@ -1183,9 +1183,11 @@ def test_predict_images_writes_prediction_report(
         },
     ]
     assert not (output_dir / "first.jpg").exists()
-    assert (output_dir / "second.jpg").exists()
-    assert (output_dir / "second.json").exists()
-    assert (output_dir.parent / "threshold-0.5_ok" / "first.jpg").exists()
+    assert not (output_dir / "second.jpg").exists()
+    assert not (output_dir / "second.json").exists()
+    assert (output_dir / "threshold-0.5_ok" / "first.jpg").exists()
+    assert (output_dir / "threshold-0.5_nok" / "second.jpg").exists()
+    assert (output_dir / "threshold-0.5_nok" / "second.json").exists()
     assert predictions == [
         {"maize": 0.9, "manure": 0.1},
         {"maize": 0.8, "manure": 0.2},
@@ -1194,7 +1196,7 @@ def test_predict_images_writes_prediction_report(
     assert model.batch_inputs == [["first.jpg"], ["second.jpg"]]
     assert fake_progress[0].n == 2
     assert fake_progress[0].closed
-    assert (output_dir / "prediction-results_0.7.csv").exists()
+    assert (output_dir / "prediction-report_0.7.csv").exists()
     assert (output_dir / "prediction-statistics_0.5.json").exists()
     assert (output_dir / "prediction-statistics_0.7.json").exists()
     statistics = json.loads(
@@ -1254,7 +1256,7 @@ def test_write_prediction_evaluation_reads_prediction_csv(tmp_path: Path) -> Non
     assert classifier.prediction_evaluation_is_complete(output_dir, (0.5,))
     assert not classifier.prediction_evaluation_is_complete(output_dir, (0.5, 0.7))
 
-    with (output_dir / "prediction-results_0.5.csv").open(
+    with (output_dir / "prediction-report_0.5.csv").open(
         encoding="utf-8", newline=""
     ) as report_file:
         rows = list(csv.DictReader(report_file))
