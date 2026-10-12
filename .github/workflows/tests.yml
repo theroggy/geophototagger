@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.env }}, Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [latest]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - env: minimal
+            python: "3.10"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Conda environment with Micromamba
+        uses: mamba-org/setup-micromamba@v3
+        with:
+          environment-file: ci/envs/${{ matrix.env }}.yml
+          create-args: >-
+            python=${{ matrix.python }}
+          cache-environment: true
+
+      - name: Run tests
+        run: python -m pytest tests -q
