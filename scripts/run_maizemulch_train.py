@@ -45,15 +45,15 @@ def main() -> None:
     project_dir = Path(f"X:/Monitoring/phototagger/{project}")
     trainingdata_dir = Path(f"X:/Monitoring/phototagger/{project}/trainingdata")
     train_data_dir = trainingdata_dir / "train"
-    validation_data_dir = trainingdata_dir / "validation"
-    moeilijk_data_dir = trainingdata_dir / "moeilijk"
+    val_data_dir = trainingdata_dir / "validation"
+    doubt_data_dir = trainingdata_dir / "twijfel"
 
-    trainingdata_eval_dir = project_dir / "trainingdata_eval"
+    traindata_eval_dir = project_dir / "trainingdata_eval"
     testdata_dir = Path("Q:/phototagger/trainingdata_raw")
     evaluation_dirs = [
-        (train_data_dir, trainingdata_eval_dir / f"{version}/train"),
-        (validation_data_dir, trainingdata_eval_dir / f"{version}/validation"),
-        (moeilijk_data_dir, trainingdata_eval_dir / f"{version}/moeilijk"),
+        (train_data_dir, traindata_eval_dir / f"{version}/{train_data_dir.name}"),
+        (val_data_dir, traindata_eval_dir / f"{version}/{val_data_dir.name}"),
+        (doubt_data_dir, traindata_eval_dir / f"{version}/{doubt_data_dir.name}"),
         (testdata_dir / "varia/test", None),
         (testdata_dir / "varia/test_extra", None),
         (testdata_dir / "korrelmais/agrilens_korrelmais_2023", None),
@@ -93,11 +93,11 @@ def main() -> None:
             train_data_dir, train_manifest_path, classes=classes, force=force
         )
         write_manifest(
-            validation_data_dir, validation_manifest_path, classes=classes, force=force
+            val_data_dir, validation_manifest_path, classes=classes, force=force
         )
         train_images = read_manifest(train_manifest_path, dataset_root=train_data_dir)
         validation_images = read_manifest(
-            validation_manifest_path, dataset_root=validation_data_dir
+            validation_manifest_path, dataset_root=val_data_dir
         )
 
         # Train the model with the specified parameters.
@@ -125,7 +125,7 @@ def main() -> None:
         logging.info(f"Run predict on {input_path} to {output_dir}")
         predictions_path = output_dir / "predictions.csv"
         if input_path.suffix.lower() == ".csv":
-            records = discover_records_csv(
+            images = discover_records_csv(
                 input_path,
                 image_path_column="image",
                 classes_column="type",
@@ -133,24 +133,24 @@ def main() -> None:
                 label_whitelist=classes,
             )
         else:
-            records = discover_records(input_path, label_whitelist=classes)
-        if not records:
+            images = discover_records(input_path, label_whitelist=classes)
+        if not images:
             raise ValueError(f"No images found in {input_path}")
 
         if not predictions_path.exists():
             predict_images(
                 model_path=model_path,
-                records=records,
+                records=images,
                 workers=4,
                 output_path=predictions_path,
             )
 
         write_prediction_evaluation(
-            records=records,
+            images=images,
             classes=sorted(classes),
-            predictions_path=predictions_path,
+            predictions=predictions_path,
             output_dir=output_dir,
-            evaluation_thresholds=evaluation_thresholds,
+            thresholds=evaluation_thresholds,
         )
 
 

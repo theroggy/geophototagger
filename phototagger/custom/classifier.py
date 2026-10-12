@@ -1339,20 +1339,19 @@ def prediction_evaluation_is_complete(
 
 
 def write_prediction_evaluation(
-    records: list[ImageRecord],
+    images: list[ImageRecord],
     classes: list[str],
-    predictions_by_path: dict[str, dict[str, float]] | Path,
+    predictions: dict[str, dict[str, float]] | Path,
     output_dir: Path,
     thresholds: Collection[float] = (0.5,),
 ) -> None:
     """Write information that makes it possible to evaluate the predictions.
 
     Args:
-        records: Labeled images to include in the reports.
+        images: Labeled images to include in the reports.
         classes: Model classes, in prediction-column order.
-        predictions_by_path: Predictions keyed by resolved image path, or a CSV
-            file containing predictions in the format written by
-            ``predict_images``.
+        predictions: Predictions keyed by resolved image path, or a CSV file containing
+            predictions in the format written by ``predict_images``.
         output_dir: Base directory for threshold-specific reports.
         thresholds: Unique probability thresholds in [0, 1].
 
@@ -1360,19 +1359,19 @@ def write_prediction_evaluation(
         ValueError: If thresholds are invalid, a record has no prediction, or a
             record contains a label outside ``classes``.
     """
-    if not records:
+    if not images:
         return
-    if isinstance(predictions_by_path, Path):
-        predictions_by_path = _read_prediction_cache(predictions_by_path, classes)
+    if isinstance(predictions, Path):
+        predictions = _read_prediction_cache(predictions, classes)
     if (
         not thresholds
         or len(set(thresholds)) != len(thresholds)
         or not all(0 <= threshold <= 1 for threshold in thresholds)
     ):
         raise ValueError("Thresholds must be unique values between 0 and 1")
-    for record in records:
+    for record in images:
         path_key = str(record.image_path.resolve())
-        if path_key not in predictions_by_path:
+        if path_key not in predictions:
             raise ValueError(f"Prediction missing for image: {record.image_path}")
         unknown_labels = set(record.labels) - set(classes)
         if unknown_labels:
@@ -1386,9 +1385,9 @@ def write_prediction_evaluation(
         if report_path.exists() and statistics_path.exists():
             continue
         _write_prediction_image_evaluation(
-            records,
+            images,
             classes,
-            predictions_by_path,
+            predictions,
             threshold=threshold,
             output_dir=output_dir,
         )
