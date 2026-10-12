@@ -404,6 +404,40 @@ def test_unfreeze_top_backbone_layers_can_toggle_block_expansion(
         assert "Unfroze" not in caplog.text
 
 
+def test_compile_model_appends_additional_metrics() -> None:
+    compile_options = {}
+
+    class FakeMetric:
+        def __init__(self, name: str, **kwargs) -> None:
+            self.name = name
+            self.kwargs = kwargs
+
+    class FakeModel:
+        def compile(self, **kwargs) -> None:
+            compile_options.update(kwargs)
+
+    keras = SimpleNamespace(
+        optimizers=SimpleNamespace(Adam=lambda **_kwargs: "adam"),
+        losses=SimpleNamespace(BinaryFocalCrossentropy=lambda: "loss"),
+        metrics=SimpleNamespace(
+            BinaryAccuracy=FakeMetric,
+            Precision=FakeMetric,
+            Recall=FakeMetric,
+        ),
+    )
+
+    custom_metric = object()
+    classifier._compile_model(keras, FakeModel(), additional_metrics=[custom_metric])
+
+    metrics = compile_options["metrics"]
+    assert [metric.name for metric in metrics[:3]] == [
+        "binary_accuracy",
+        "precision",
+        "recall",
+    ]
+    assert metrics[3] is custom_metric
+
+
 @pytest.mark.parametrize(
     ("head_dropout", "head_l2", "expected_regularizer"),
     [(0.5, 0.005, ("l2", 0.005)), (0.0, 0.0, None)],
@@ -454,8 +488,9 @@ def test_build_model_configures_head_regularization(
     monkeypatch.setattr(classifier, "_keras", lambda: keras)
     compile_options = {}
 
-    def fake_compile(_keras, _model, *, learning_rate):
+    def fake_compile(_keras, _model, *, learning_rate, additional_metrics=None):
         compile_options["learning_rate"] = learning_rate
+        compile_options["additional_metrics"] = additional_metrics
 
     monkeypatch.setattr(classifier, "_compile_model", fake_compile)
 
@@ -487,6 +522,7 @@ def test_train_model_forwards_finetuning_settings(
 ) -> None:
     record = ImageRecord(tmp_path / "training.jpg", ("maize",))
     model = object()
+    custom_metric = object()
     fit_kwargs = {}
 
     def fake_fit_model(*_args, **kwargs):
@@ -508,6 +544,7 @@ def test_train_model_forwards_finetuning_settings(
         reduce_lr_patience=4,
         reduce_lr_factor=0.3,
         min_learning_rate=1e-7,
+        additional_metrics=[custom_metric],
     )
 
     assert returned_model is model
@@ -520,6 +557,7 @@ def test_train_model_forwards_finetuning_settings(
     assert fit_kwargs["reduce_lr_patience"] == 4
     assert fit_kwargs["reduce_lr_factor"] == 0.3
     assert fit_kwargs["min_learning_rate"] == 1e-7
+    assert fit_kwargs["additional_metrics"] == [custom_metric]
 
 
 @pytest.mark.parametrize(

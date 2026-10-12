@@ -431,7 +431,13 @@ def write_prediction_evaluation_info(
     )
 
 
-def _compile_model(keras: Any, model: Any, learning_rate: float = 1e-3) -> None:
+def _compile_model(
+    keras: Any,
+    model: Any,
+    learning_rate: float = 1e-3,
+    *,
+    additional_metrics: list[Any] | None = None,
+) -> None:
     """Compile a classifier model with the configured optimizer and metrics."""
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
@@ -440,6 +446,7 @@ def _compile_model(keras: Any, model: Any, learning_rate: float = 1e-3) -> None:
             keras.metrics.BinaryAccuracy(name="binary_accuracy"),
             keras.metrics.Precision(name="precision"),
             keras.metrics.Recall(name="recall"),
+            *(additional_metrics or ()),
         ],
     )
 
@@ -504,13 +511,14 @@ def _make_best_model_metrics_callback(keras: Any, checkpoint: Any) -> Any:
 def _build_model(
     class_count: int,
     image_size: tuple[int, int] = (224, 224),
-    backbone: str = "EfficientNetV2S",
+    backbone: str = "EfficientNetV2B0",
     weights: str | None = "imagenet",
     augment: bool = True,
     *,
     learning_rate: float = 1e-3,
     head_dropout: float = 0.5,
     head_l2: float = 0.005,
+    additional_metrics: list[Any] | None = None,
 ) -> tuple[Any, Any]:
     """Build a compiled classifier and its initially frozen feature extractor."""
     _validate_learning_rate(learning_rate)
@@ -551,7 +559,12 @@ def _build_model(
         kernel_regularizer=(keras.regularizers.L2(head_l2) if head_l2 else None),
     )(features)
     model = keras.Model(inputs, outputs)
-    _compile_model(keras, model, learning_rate=learning_rate)
+    _compile_model(
+        keras,
+        model,
+        learning_rate=learning_rate,
+        additional_metrics=additional_metrics,
+    )
     return model, feature_extractor
 
 
@@ -730,6 +743,7 @@ def _fit_model(
     monitor_metric: str,
     batch_size: int,
     workers: int,
+    additional_metrics: list[Any] | None = None,
 ) -> Any:
     """Fit, checkpoint, and return a model using prepared record splits.
 
@@ -762,6 +776,7 @@ def _fit_model(
         monitor_metric: Metric used to select checkpoints and stop training.
         batch_size: Images per training batch.
         workers: Background image-loading threads; zero loads synchronously.
+        additional_metrics: Keras metrics to add alongside the default metrics.
 
     Returns:
         The best checkpointed Keras model.
@@ -830,6 +845,7 @@ def _fit_model(
         learning_rate=learning_rate,
         head_dropout=head_dropout,
         head_l2=head_l2,
+        additional_metrics=additional_metrics,
     )
     fit_kwargs: dict[str, Any] = {"epochs": epochs}
     if validation_dataset is not None:
@@ -871,7 +887,12 @@ def _fit_model(
         actual_unfrozen_backbone_layers = _unfreeze_top_backbone_layers(
             feature_extractor, layer_count=unfrozen_backbone_layers
         )
-        _compile_model(keras, model, learning_rate=learning_rate)
+        _compile_model(
+            keras,
+            model,
+            learning_rate=learning_rate,
+            additional_metrics=additional_metrics,
+        )
         fit_kwargs["initial_epoch"] = frozen_epochs
         fit_kwargs["epochs"] = epochs
         model.fit(train_dataset, **fit_kwargs)
@@ -923,7 +944,7 @@ def train_model(
     crop_window_scale: float = 1.0,
     backbone: str = "EfficientNetV2S",
     weights: str | None = "imagenet",
-    epochs: int = 100,
+    epochs: int = 300,
     validation_split: float = 0.0,
     seed: int = 42,
     frozen_backbone_epochs: int = 5,
@@ -933,12 +954,13 @@ def train_model(
     head_dropout: float = 0.5,
     head_l2: float = 0.005,
     class_weighting: bool = False,
-    early_stopping_patience: int = 20,
-    reduce_lr_patience: int = 5,
-    reduce_lr_factor: float = 0.2,
+    early_stopping_patience: int = 100,
+    reduce_lr_patience: int = 30,
+    reduce_lr_factor: float = 0.5,
     min_learning_rate: float = 1e-6,
     monitor_metric: str = "val_loss",
-    batch_size: int = 32,
+    additional_metrics: list[Any] | None = None,
+    batch_size: int = 16,
     workers: int = 4,
     force: bool = False,
 ) -> Any:
@@ -983,6 +1005,7 @@ def train_model(
             evaluate early stopping, e.g. ``"loss"``, ``"binary_accuracy"``,
             ``"precision"`` or ``"recall"``. A ``val_`` prefix is added
             automatically when validation data is available.
+        additional_metrics: Keras metrics to add alongside the default metrics.
         batch_size: Number of images loaded into memory per training batch.
         workers: Number of background threads used to load image batches
             ahead of time while the model trains. Set to zero to load
@@ -1058,6 +1081,7 @@ def train_model(
             monitor_metric=monitor_metric,
             batch_size=batch_size,
             workers=workers,
+            additional_metrics=additional_metrics,
         )
 
     return model
