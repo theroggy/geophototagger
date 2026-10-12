@@ -1,0 +1,47 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.env }}, Python ${{ matrix.python }}, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash -l {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [latest]
+        # Pytorch is only supported till Python 3.14
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        os: [ubuntu-latest]
+        include:
+          - env: minimal
+            python: "3.10"
+            os: ubuntu-latest
+          - env: latest
+            python: "3.13"
+            os: windows-latest
+          - env: latest
+            python: "3.13"
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Conda environment with Micromamba
+        uses: mamba-org/setup-micromamba@v3
+        with:
+          environment-file: ci/envs/${{ matrix.env }}.yml
+          create-args: >-
+            python=${{ matrix.python }}
+          cache-environment: true
+
+      - name: Run tests
+        run: python -m pytest tests -q

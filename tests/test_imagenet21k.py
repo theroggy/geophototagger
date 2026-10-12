@@ -1,10 +1,9 @@
-import csv
-import json
 import math
 import sys
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import pytest
 from PIL import Image
@@ -58,7 +57,7 @@ def fake_inference(monkeypatch: pytest.MonkeyPatch):
         def eval(self):
             return self
 
-        def to(self, device):
+        def to(self, _device):
             return self
 
         def __call__(self, images: list[int]) -> FakeProbabilities:
@@ -84,7 +83,7 @@ def fake_inference(monkeypatch: pytest.MonkeyPatch):
     )
 
     class FakeTensor(list):
-        def to(self, device):
+        def to(self, _device):
             return self
 
     torch = SimpleNamespace(
@@ -111,7 +110,11 @@ def make_image(path: Path, value: int) -> Path:
     ],
 )
 def test_models_use_matching_labels_and_threshold(
-    tmp_path: Path, fake_inference, model_name: str, checkpoint: str, subset: str
+    tmp_path: Path,
+    fake_inference,
+    model_name: Literal["efficientnetv2", "convnext"],
+    checkpoint: str,
+    subset: str,
 ) -> None:
     first = make_image(tmp_path / "first.png", 10)
     second = make_image(tmp_path / "second.png", 20)
@@ -169,42 +172,24 @@ def test_empty_and_missing_input_fail_before_download(tmp_path: Path) -> None:
         imagenet21k.classify_images([tmp_path / "missing.jpg"])
 
 
-@pytest.mark.usefixtures("fake_inference")
-def test_script_discovers_files_and_writes_csv(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    image_path = make_image(tmp_path / "image.PNG", 10)
-    (tmp_path / "other.txt").write_text("ignore", encoding="utf-8")
-    output_dir = tmp_path / "output"
-    output_path = output_dir / "predictions.csv"
-    monkeypatch.setattr(script, "INPUT_PATH", tmp_path)
-    monkeypatch.setattr(script, "OUTPUT_DIR", output_dir)
-    monkeypatch.setattr(script, "THRESHOLD", 0.2)
+def test_script_passes_configured_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        script,
+        "classify_images",
+        lambda input_path, **kwargs: calls.append((input_path, kwargs)),
+    )
     script.main()
-    with output_path.open(encoding="utf-8", newline="") as output_file:
-        rows = list(csv.DictReader(output_file))
-    assert len(rows) == 1
-    assert rows[0]["image_path"] == str(image_path)
-    assert rows[0]["model"] == "efficientnetv2"
-    predictions = json.loads(rows[0]["predictions"])
-    assert [prediction["class_index"] for prediction in predictions] == [1, 2]
-    assert predictions[0]["synset"] == "n1"
-    assert predictions[0]["label"] == "class 1"
-    assert predictions[0]["probability"] == pytest.approx(0.66524, abs=0.00001)
 
-
-@pytest.mark.usefixtures("fake_inference")
-def test_script_writes_empty_predictions_list_with_no_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    make_image(tmp_path / "image.png", 10)
-    output_dir = tmp_path / "empty"
-    output_path = output_dir / "predictions.csv"
-    monkeypatch.setattr(script, "INPUT_PATH", tmp_path)
-    monkeypatch.setattr(script, "OUTPUT_DIR", output_dir)
-    monkeypatch.setattr(script, "THRESHOLD", 1.0)
-    script.main()
-    with output_path.open(encoding="utf-8", newline="") as output_file:
-        rows = list(csv.DictReader(output_file))
-    assert len(rows) == 1
-    assert json.loads(rows[0]["predictions"]) == []
+    input_path = Path("Q:/phototagger/trainingdata_raw/varia/test_extra")
+    assert calls == [
+        (
+            input_path,
+            {
+                "model_name": "efficientnetv2",
+                "threshold": 0.01,
+                "batch_size": 8,
+                "output_dir": input_path.parent / f"{input_path.name}_imagenet",
+            },
+        )
+    ]
