@@ -17,7 +17,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -458,7 +458,7 @@ def _make_csv_logger(keras: Any, path: Path, *, append: bool) -> Any:
         def on_train_begin(self, logs: dict[str, Any] | None = None) -> None:
             super().on_train_begin(logs)
             self.csv_file.close()
-            self.csv_file = Path(self.filename).open(
+            self.csv_file: TextIO = Path(self.filename).open(
                 "a" if self.append else "w", newline=""
             )
 
@@ -1220,9 +1220,9 @@ def predict_images(
     if busy_path is not None:
         busy_path.parent.mkdir(parents=True, exist_ok=True)
         with busy_path.open("w", encoding="utf-8", newline="") as output_file:
-            writer = csv.DictWriter(output_file, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(
+            cache_writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+            cache_writer.writeheader()
+            cache_writer.writerows(
                 {
                     "image_path": image_key,
                     **{f"{label}_probability": predictions[label] for label in labels},
@@ -1298,8 +1298,8 @@ def predict_images(
     if busy_path is not None and output_path is not None:
         busy_path.replace(output_path)
 
-    predictions = [dict(cached_predictions[key]) for key in input_keys]
-    return predictions
+    ordered_predictions = [dict(cached_predictions[key]) for key in input_keys]
+    return ordered_predictions
 
 
 def prediction_evaluation_is_complete(
