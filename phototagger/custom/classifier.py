@@ -348,7 +348,7 @@ def _write_prediction_image_evaluation(
             ],
         )
         writer.writeheader()
-        for record in tqdm(records, desc=f"Create eval dir {threshold}", unit="image"):
+        for record in tqdm(records, desc=f"Create eval dirs {threshold}", unit="image"):
             path_key = str(record.image_path.resolve())
             predicted_probabilities = predictions_by_path[path_key]
             predicted_labels = {
@@ -1172,7 +1172,7 @@ def _iter_prediction_batches(dataset: Any, workers: int) -> Any:
 
 def predict_images(
     model_path: Path,
-    image_paths: list[Path] | list[ImageRecord],
+    images: list[Path] | list[ImageRecord],
     batch_size: int = 12,
     workers: int = 4,
     output_path: Path | None = None,
@@ -1181,7 +1181,7 @@ def predict_images(
 
     Args:
         model_path: Saved Keras model path with adjacent JSON metadata.
-        image_paths: Image paths or labeled ``ImageRecord`` values to classify.
+        images: Image paths or labeled ``ImageRecord`` values to classify.
         batch_size: Number of images loaded and predicted per batch.
         workers: Number of background threads used to load batches ahead of
             prediction. Set to zero to load synchronously.
@@ -1205,7 +1205,7 @@ def predict_images(
         image_path
         if isinstance(image_path, ImageRecord)
         else ImageRecord(image_path, ())
-        for image_path in image_paths
+        for image_path in images
     ]
     input_keys = [str(record.image_path.resolve()) for record in records]
 

@@ -140,7 +140,7 @@ def main() -> None:
         if not predictions_path.exists():
             predict_images(
                 model_path=model_path,
-                records=images,
+                images=images,
                 workers=4,
                 output_path=predictions_path,
             )
