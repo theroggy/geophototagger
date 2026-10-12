@@ -9,8 +9,8 @@ permissions:
 
 jobs:
   test:
-    name: ${{ matrix.env }}, Python ${{ matrix.python }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.env }}, Python ${{ matrix.python }}, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash -l {0}
@@ -19,9 +19,17 @@ jobs:
       matrix:
         env: [latest]
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        os: [ubuntu-latest]
         include:
           - env: minimal
             python: "3.10"
+            os: ubuntu-latest
+          - env: latest
+            python: "3.12"
+            os: windows-latest
+          - env: latest
+            python: "3.12"
+            os: macos-latest
 
     steps:
       - uses: actions/checkout@v7
