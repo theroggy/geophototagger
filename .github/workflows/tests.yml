@@ -18,17 +18,17 @@ jobs:
       fail-fast: false
       matrix:
         env: [latest]
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
         os: [ubuntu-latest]
         include:
           - env: minimal
             python: "3.10"
             os: ubuntu-latest
           - env: latest
-            python: "3.12"
+            python: "3.13"
             os: windows-latest
           - env: latest
-            python: "3.12"
+            python: "3.13"
             os: macos-latest
 
     steps:
