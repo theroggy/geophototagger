@@ -295,143 +295,13 @@ def _prediction_progress_callback(
     )
 
 
-def write_prediction_evaluation_info(
-    records: list[ImageRecord],
-    classes: list[str],
-    predictions_by_path: dict[str, dict[str, float]],
+def _compile_model(
+    keras: Any,
+    model: Any,
+    learning_rate: float = 1e-3,
     *,
-    threshold: float,
-    output_dir: Path,
+    additional_metrics: list[Any] | None = None,
 ) -> None:
-    """Write an evaluation information for one classification threshold."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    label_statistics = {
-        label: {
-            "true_positives": 0,
-            "false_positives": 0,
-            "true_negatives": 0,
-            "false_negatives": 0,
-        }
-        for label in classes
-    }
-    correctly_classified_count = 0
-    output_dir_ok = output_dir.parent / f"{output_dir.name}_ok"
-    output_dir_ok.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / "prediction-results.csv"
-    with report_path.open("w", encoding="utf-8", newline="") as report_file:
-        writer = csv.DictWriter(
-            report_file,
-            fieldnames=[
-                "image_path",
-                "expected_labels",
-                "predicted_labels",
-                "correctly_classified",
-                *(f"{label}_probability" for label in classes),
-            ],
-        )
-        writer.writeheader()
-        for record in tqdm(records, desc=f"Create eval dir {threshold}", unit="image"):
-            path_key = str(record.image_path.resolve())
-            predicted_probabilities = predictions_by_path[path_key]
-            predicted_labels = {
-                label
-                for label, probability in predicted_probabilities.items()
-                if probability >= threshold
-            }
-            correctly_classified = predicted_labels == set(record.labels)
-            correctly_classified_count += correctly_classified
-            for label, counts in label_statistics.items():
-                expected = label in record.labels
-                predicted = label in predicted_labels
-                if expected and predicted:
-                    counts["true_positives"] += 1
-                elif predicted:
-                    counts["false_positives"] += 1
-                elif expected:
-                    counts["false_negatives"] += 1
-                else:
-                    counts["true_negatives"] += 1
-            writer.writerow(
-                {
-                    "image_path": str(record.image_path),
-                    "expected_labels": ";".join(record.labels),
-                    "predicted_labels": ";".join(sorted(predicted_labels)),
-                    "correctly_classified": correctly_classified,
-                    **{
-                        f"{label}_probability": predicted_probabilities[label]
-                        for label in classes
-                    },
-                }
-            )
-
-            # Copy the image and write the JSON metadata to the appropriate output
-            # directory based on classification correctness.
-            if correctly_classified:
-                dst_path = output_dir_ok / record.image_path.name
-                json_dst_path = output_dir_ok / f"{record.image_path.stem}.json"
-            else:
-                dst_path = output_dir / record.image_path.name
-                json_dst_path = output_dir / f"{record.image_path.stem}.json"
-
-            if not dst_path.exists():
-                os.link(record.image_path, dst_path)
-            json_dst_path.write_text(
-                json.dumps(
-                    {
-                        "image": str(record.image_path),
-                        "expected_labels": list(record.labels),
-                        "predicted_labels": sorted(predicted_labels),
-                        "probabilities": predicted_probabilities,
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-
-    label_metrics = {}
-    record_count = len(records)
-    for label, counts in label_statistics.items():
-        precision_denominator = counts["true_positives"] + counts["false_positives"]
-        recall_denominator = counts["true_positives"] + counts["false_negatives"]
-        precision = (
-            counts["true_positives"] / precision_denominator
-            if precision_denominator
-            else 0.0
-        )
-        recall = (
-            counts["true_positives"] / recall_denominator if recall_denominator else 0.0
-        )
-        label_metrics[label] = {
-            **counts,
-            "accuracy": (counts["true_positives"] + counts["true_negatives"])
-            / record_count,
-            "precision": precision,
-            "recall": recall,
-            "f1_score": 2 * precision * recall / (precision + recall)
-            if precision + recall
-            else 0.0,
-        }
-    misclassified_count = record_count - correctly_classified_count
-    (output_dir / "prediction-statistics.json").write_text(
-        json.dumps(
-            {
-                "classification_threshold": threshold,
-                "total_files": record_count,
-                "correctly_classified_files": correctly_classified_count,
-                "correctly_classified_percentage": 100
-                * correctly_classified_count
-                / record_count,
-                "misclassified_files": misclassified_count,
-                "misclassified_percentage": 100 * misclassified_count / record_count,
-                "per_label": label_metrics,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-
-def _compile_model(keras: Any, model: Any, learning_rate: float = 1e-3) -> None:
     """Compile a classifier model with the configured optimizer and metrics."""
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
@@ -440,6 +310,7 @@ def _compile_model(keras: Any, model: Any, learning_rate: float = 1e-3) -> None:
             keras.metrics.BinaryAccuracy(name="binary_accuracy"),
             keras.metrics.Precision(name="precision"),
             keras.metrics.Recall(name="recall"),
+            *(additional_metrics or ()),
         ],
     )
 
@@ -504,13 +375,14 @@ def _make_best_model_metrics_callback(keras: Any, checkpoint: Any) -> Any:
 def _build_model(
     class_count: int,
     image_size: tuple[int, int] = (224, 224),
-    backbone: str = "EfficientNetV2S",
+    backbone: str = "EfficientNetV2B0",
     weights: str | None = "imagenet",
     augment: bool = True,
     *,
     learning_rate: float = 1e-3,
     head_dropout: float = 0.5,
     head_l2: float = 0.005,
+    additional_metrics: list[Any] | None = None,
 ) -> tuple[Any, Any]:
     """Build a compiled classifier and its initially frozen feature extractor."""
     _validate_learning_rate(learning_rate)
@@ -551,7 +423,12 @@ def _build_model(
         kernel_regularizer=(keras.regularizers.L2(head_l2) if head_l2 else None),
     )(features)
     model = keras.Model(inputs, outputs)
-    _compile_model(keras, model, learning_rate=learning_rate)
+    _compile_model(
+        keras,
+        model,
+        learning_rate=learning_rate,
+        additional_metrics=additional_metrics,
+    )
     return model, feature_extractor
 
 
@@ -730,6 +607,7 @@ def _fit_model(
     monitor_metric: str,
     batch_size: int,
     workers: int,
+    additional_metrics: list[Any] | None = None,
 ) -> Any:
     """Fit, checkpoint, and return a model using prepared record splits.
 
@@ -762,6 +640,7 @@ def _fit_model(
         monitor_metric: Metric used to select checkpoints and stop training.
         batch_size: Images per training batch.
         workers: Background image-loading threads; zero loads synchronously.
+        additional_metrics: Keras metrics to add alongside the default metrics.
 
     Returns:
         The best checkpointed Keras model.
@@ -830,6 +709,7 @@ def _fit_model(
         learning_rate=learning_rate,
         head_dropout=head_dropout,
         head_l2=head_l2,
+        additional_metrics=additional_metrics,
     )
     fit_kwargs: dict[str, Any] = {"epochs": epochs}
     if validation_dataset is not None:
@@ -871,7 +751,12 @@ def _fit_model(
         actual_unfrozen_backbone_layers = _unfreeze_top_backbone_layers(
             feature_extractor, layer_count=unfrozen_backbone_layers
         )
-        _compile_model(keras, model, learning_rate=learning_rate)
+        _compile_model(
+            keras,
+            model,
+            learning_rate=learning_rate,
+            additional_metrics=additional_metrics,
+        )
         fit_kwargs["initial_epoch"] = frozen_epochs
         fit_kwargs["epochs"] = epochs
         model.fit(train_dataset, **fit_kwargs)
@@ -923,7 +808,7 @@ def train_model(
     crop_window_scale: float = 1.0,
     backbone: str = "EfficientNetV2S",
     weights: str | None = "imagenet",
-    epochs: int = 100,
+    epochs: int = 300,
     validation_split: float = 0.0,
     seed: int = 42,
     frozen_backbone_epochs: int = 5,
@@ -933,12 +818,13 @@ def train_model(
     head_dropout: float = 0.5,
     head_l2: float = 0.005,
     class_weighting: bool = False,
-    early_stopping_patience: int = 20,
-    reduce_lr_patience: int = 5,
-    reduce_lr_factor: float = 0.2,
+    early_stopping_patience: int = 100,
+    reduce_lr_patience: int = 30,
+    reduce_lr_factor: float = 0.5,
     min_learning_rate: float = 1e-6,
     monitor_metric: str = "val_loss",
-    batch_size: int = 32,
+    additional_metrics: list[Any] | None = None,
+    batch_size: int = 16,
     workers: int = 4,
     force: bool = False,
 ) -> Any:
@@ -983,6 +869,7 @@ def train_model(
             evaluate early stopping, e.g. ``"loss"``, ``"binary_accuracy"``,
             ``"precision"`` or ``"recall"``. A ``val_`` prefix is added
             automatically when validation data is available.
+        additional_metrics: Keras metrics to add alongside the default metrics.
         batch_size: Number of images loaded into memory per training batch.
         workers: Number of background threads used to load image batches
             ahead of time while the model trains. Set to zero to load
@@ -1058,6 +945,7 @@ def train_model(
             monitor_metric=monitor_metric,
             batch_size=batch_size,
             workers=workers,
+            additional_metrics=additional_metrics,
         )
 
     return model
@@ -1128,9 +1016,39 @@ def _iter_prediction_batches(dataset: Any, workers: int) -> Any:
                 next_batch += 1
 
 
+def predict_image(model_path: Path, image_path: Path) -> dict[str, float]:
+    """Predict label probabilities for one image.
+
+    Args:
+        model_path: Saved Keras model path with adjacent JSON metadata.
+        image_path: Image to classify.
+
+    Returns:
+        Mapping from metadata label names to predicted probabilities.
+    """
+    metadata = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
+    image_size = tuple(metadata["image_size"])
+    crop_to_aspect_ratio = metadata.get("crop_to_aspect_ratio", False)
+    crop_window_scale = _crop_window_scale_from_metadata(metadata)
+    keras = _keras()
+    model = keras.models.load_model(model_path)
+    image = _load_images(
+        [ImageRecord(image_path, ())],
+        image_size,
+        crop_to_aspect_ratio=crop_to_aspect_ratio,
+        crop_window_scale=crop_window_scale,
+    )
+    logging.info("Predicting %s", image_path)
+    probabilities = model.predict(image, verbose=0)[0]
+    logging.info("Prediction complete for %s", image_path)
+    return dict(
+        zip(metadata["labels"], (float(value) for value in probabilities), strict=True)
+    )
+
+
 def predict_images(
     model_path: Path,
-    image_paths: list[Path] | list[ImageRecord],
+    images: list[Path] | list[ImageRecord],
     batch_size: int = 12,
     workers: int = 4,
     output_path: Path | None = None,
@@ -1139,7 +1057,7 @@ def predict_images(
 
     Args:
         model_path: Saved Keras model path with adjacent JSON metadata.
-        image_paths: Image paths or labeled ``ImageRecord`` values to classify.
+        images: Image paths or labeled ``ImageRecord`` values to classify.
         batch_size: Number of images loaded and predicted per batch.
         workers: Number of background threads used to load batches ahead of
             prediction. Set to zero to load synchronously.
@@ -1163,7 +1081,7 @@ def predict_images(
         image_path
         if isinstance(image_path, ImageRecord)
         else ImageRecord(image_path, ())
-        for image_path in image_paths
+        for image_path in images
     ]
     input_keys = [str(record.image_path.resolve()) for record in records]
 
@@ -1290,29 +1208,28 @@ def prediction_evaluation_is_complete(
         return False
 
     return all(
-        (report_dir / "prediction-results.csv").is_file()
-        and (report_dir / "prediction-statistics.json").is_file()
-        for report_dir in (
-            output_dir / f"threshold-{threshold:g}" for threshold in thresholds
+        all(
+            path.is_file()
+            for path in _prediction_evaluation_paths(output_dir, threshold)
         )
+        for threshold in thresholds
     )
 
 
 def write_prediction_evaluation(
-    records: list[ImageRecord],
+    images: list[ImageRecord],
     classes: list[str],
-    predictions_by_path: dict[str, dict[str, float]] | Path,
+    predictions: dict[str, dict[str, float]] | Path,
     output_dir: Path,
     thresholds: Collection[float] = (0.5,),
 ) -> None:
     """Write information that makes it possible to evaluate the predictions.
 
     Args:
-        records: Labeled images to include in the reports.
+        images: Labeled images to include in the reports.
         classes: Model classes, in prediction-column order.
-        predictions_by_path: Predictions keyed by resolved image path, or a CSV
-            file containing predictions in the format written by
-            ``predict_images``.
+        predictions: Predictions keyed by resolved image path, or a CSV file containing
+            predictions in the format written by ``predict_images``.
         output_dir: Base directory for threshold-specific reports.
         thresholds: Unique probability thresholds in [0, 1].
 
@@ -1320,19 +1237,19 @@ def write_prediction_evaluation(
         ValueError: If thresholds are invalid, a record has no prediction, or a
             record contains a label outside ``classes``.
     """
-    if not records:
+    if not images:
         return
-    if isinstance(predictions_by_path, Path):
-        predictions_by_path = _read_prediction_cache(predictions_by_path, classes)
+    if isinstance(predictions, Path):
+        predictions = _read_prediction_cache(predictions, classes)
     if (
         not thresholds
         or len(set(thresholds)) != len(thresholds)
         or not all(0 <= threshold <= 1 for threshold in thresholds)
     ):
         raise ValueError("Thresholds must be unique values between 0 and 1")
-    for record in records:
+    for record in images:
         path_key = str(record.image_path.resolve())
-        if path_key not in predictions_by_path:
+        if path_key not in predictions:
             raise ValueError(f"Prediction missing for image: {record.image_path}")
         unknown_labels = set(record.labels) - set(classes)
         if unknown_labels:
@@ -1341,45 +1258,179 @@ def write_prediction_evaluation(
             )
 
     for threshold in thresholds:
-        report_dir = output_dir / f"threshold-{threshold:g}"
-        report_path = report_dir / "prediction-results.csv"
-        statistics_path = report_dir / "prediction-statistics.json"
-        if report_path.exists() and statistics_path.exists():
-            continue
-        write_prediction_evaluation_info(
-            records,
+        _write_prediction_image_evaluation(
+            images,
             classes,
-            predictions_by_path,
+            predictions,
             threshold=threshold,
-            output_dir=report_dir,
+            output_dir=output_dir,
         )
 
 
-def predict_image(model_path: Path, image_path: Path) -> dict[str, float]:
-    """Predict label probabilities for one image.
+def _write_prediction_image_evaluation(
+    records: list[ImageRecord],
+    classes: list[str],
+    predictions_by_path: dict[str, dict[str, float]],
+    *,
+    threshold: float,
+    output_dir: Path,
+) -> None:
+    """Write image evaluation information for one classification threshold.
+
+    This function evaluates the predictions for each image against the expected labels,
+    calculates per-label statistics, and writes the results to a CSV file.
+
+    It also creates subdirectories with the images split into "ok" and "nok" directories
+    based on whether they were correctly classified according to the specified
+    threshold.
 
     Args:
-        model_path: Saved Keras model path with adjacent JSON metadata.
-        image_path: Image to classify.
-
-    Returns:
-        Mapping from metadata label names to predicted probabilities.
+        records: A list of ImageRecord objects representing the images to evaluate.
+        classes: A list of class labels.
+        predictions_by_path: A dictionary mapping image paths to predicted
+            probabilities for each class.
+        threshold: The classification threshold for determining predicted labels.
+        output_dir: The directory where evaluation results will be written.
     """
-    metadata = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
-    image_size = tuple(metadata["image_size"])
-    crop_to_aspect_ratio = metadata.get("crop_to_aspect_ratio", False)
-    crop_window_scale = _crop_window_scale_from_metadata(metadata)
-    keras = _keras()
-    model = keras.models.load_model(model_path)
-    image = _load_images(
-        [ImageRecord(image_path, ())],
-        image_size,
-        crop_to_aspect_ratio=crop_to_aspect_ratio,
-        crop_window_scale=crop_window_scale,
+    report_path, statistics_path = _prediction_evaluation_paths(output_dir, threshold)
+    if report_path.exists() and statistics_path.exists():
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    label_statistics = {
+        label: {
+            "true_positives": 0,
+            "false_positives": 0,
+            "true_negatives": 0,
+            "false_negatives": 0,
+        }
+        for label in classes
+    }
+    correctly_classified_count = 0
+    output_ok_dir = output_dir / f"threshold-{threshold:g}_ok"
+    output_ok_dir.mkdir(parents=True, exist_ok=True)
+    output_nok_dir = output_dir / f"threshold-{threshold:g}_nok"
+    output_nok_dir.mkdir(parents=True, exist_ok=True)
+    with report_path.open("w", encoding="utf-8", newline="") as report_file:
+        writer = csv.DictWriter(
+            report_file,
+            fieldnames=[
+                "image_path",
+                "expected_labels",
+                "predicted_labels",
+                "correctly_classified",
+                *(f"{label}_probability" for label in classes),
+            ],
+        )
+        writer.writeheader()
+        for record in tqdm(records, desc=f"Create eval dirs {threshold}", unit="image"):
+            path_key = str(record.image_path.resolve())
+            predicted_probabilities = predictions_by_path[path_key]
+            predicted_labels = {
+                label
+                for label, probability in predicted_probabilities.items()
+                if probability >= threshold
+            }
+            correctly_classified = predicted_labels == set(record.labels)
+            correctly_classified_count += correctly_classified
+            for label, counts in label_statistics.items():
+                expected = label in record.labels
+                predicted = label in predicted_labels
+                if expected and predicted:
+                    counts["true_positives"] += 1
+                elif predicted:
+                    counts["false_positives"] += 1
+                elif expected:
+                    counts["false_negatives"] += 1
+                else:
+                    counts["true_negatives"] += 1
+            writer.writerow(
+                {
+                    "image_path": str(record.image_path),
+                    "expected_labels": ";".join(record.labels),
+                    "predicted_labels": ";".join(sorted(predicted_labels)),
+                    "correctly_classified": correctly_classified,
+                    **{
+                        f"{label}_probability": predicted_probabilities[label]
+                        for label in classes
+                    },
+                }
+            )
+
+            # Copy the image and write the JSON metadata to the appropriate output
+            # directory based on classification correctness.
+            if correctly_classified:
+                dst_path = output_ok_dir / record.image_path.name
+                json_dst_path = output_ok_dir / f"{record.image_path.stem}.json"
+            else:
+                dst_path = output_nok_dir / record.image_path.name
+                json_dst_path = output_nok_dir / f"{record.image_path.stem}.json"
+
+            if not dst_path.exists():
+                os.link(record.image_path, dst_path)
+            json_dst_path.write_text(
+                json.dumps(
+                    {
+                        "image": str(record.image_path),
+                        "expected_labels": list(record.labels),
+                        "predicted_labels": sorted(predicted_labels),
+                        "probabilities": predicted_probabilities,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+    label_metrics = {}
+    record_count = len(records)
+    for label, counts in label_statistics.items():
+        precision_denominator = counts["true_positives"] + counts["false_positives"]
+        recall_denominator = counts["true_positives"] + counts["false_negatives"]
+        precision = (
+            counts["true_positives"] / precision_denominator
+            if precision_denominator
+            else 0.0
+        )
+        recall = (
+            counts["true_positives"] / recall_denominator if recall_denominator else 0.0
+        )
+        label_metrics[label] = {
+            **counts,
+            "accuracy": (counts["true_positives"] + counts["true_negatives"])
+            / record_count,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": 2 * precision * recall / (precision + recall)
+            if precision + recall
+            else 0.0,
+        }
+    misclassified_count = record_count - correctly_classified_count
+
+    # Write the classification statistics to the JSON file.
+    statistics_path.write_text(
+        json.dumps(
+            {
+                "classification_threshold": threshold,
+                "total_files": record_count,
+                "correctly_classified_files": correctly_classified_count,
+                "correctly_classified_percentage": 100
+                * correctly_classified_count
+                / record_count,
+                "misclassified_files": misclassified_count,
+                "misclassified_percentage": 100 * misclassified_count / record_count,
+                "per_label": label_metrics,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
     )
-    logging.info("Predicting %s", image_path)
-    probabilities = model.predict(image, verbose=0)[0]
-    logging.info("Prediction complete for %s", image_path)
-    return dict(
-        zip(metadata["labels"], (float(value) for value in probabilities), strict=True)
+
+
+def _prediction_evaluation_paths(
+    output_dir: Path, threshold: float
+) -> tuple[Path, Path]:
+    """Return the report and statistics paths for one evaluation threshold."""
+    return (
+        output_dir / f"prediction-report_{threshold:g}.csv",
+        output_dir / f"prediction-statistics_{threshold:g}.json",
     )

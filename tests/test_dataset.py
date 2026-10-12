@@ -404,6 +404,40 @@ def test_unfreeze_top_backbone_layers_can_toggle_block_expansion(
         assert "Unfroze" not in caplog.text
 
 
+def test_compile_model_appends_additional_metrics() -> None:
+    compile_options = {}
+
+    class FakeMetric:
+        def __init__(self, name: str, **kwargs) -> None:
+            self.name = name
+            self.kwargs = kwargs
+
+    class FakeModel:
+        def compile(self, **kwargs) -> None:
+            compile_options.update(kwargs)
+
+    keras = SimpleNamespace(
+        optimizers=SimpleNamespace(Adam=lambda **_kwargs: "adam"),
+        losses=SimpleNamespace(BinaryFocalCrossentropy=lambda: "loss"),
+        metrics=SimpleNamespace(
+            BinaryAccuracy=FakeMetric,
+            Precision=FakeMetric,
+            Recall=FakeMetric,
+        ),
+    )
+
+    custom_metric = object()
+    classifier._compile_model(keras, FakeModel(), additional_metrics=[custom_metric])
+
+    metrics = compile_options["metrics"]
+    assert [metric.name for metric in metrics[:3]] == [
+        "binary_accuracy",
+        "precision",
+        "recall",
+    ]
+    assert metrics[3] is custom_metric
+
+
 @pytest.mark.parametrize(
     ("head_dropout", "head_l2", "expected_regularizer"),
     [(0.5, 0.005, ("l2", 0.005)), (0.0, 0.0, None)],
@@ -454,8 +488,9 @@ def test_build_model_configures_head_regularization(
     monkeypatch.setattr(classifier, "_keras", lambda: keras)
     compile_options = {}
 
-    def fake_compile(_keras, _model, *, learning_rate):
+    def fake_compile(_keras, _model, *, learning_rate, additional_metrics=None):
         compile_options["learning_rate"] = learning_rate
+        compile_options["additional_metrics"] = additional_metrics
 
     monkeypatch.setattr(classifier, "_compile_model", fake_compile)
 
@@ -487,6 +522,7 @@ def test_train_model_forwards_finetuning_settings(
 ) -> None:
     record = ImageRecord(tmp_path / "training.jpg", ("maize",))
     model = object()
+    custom_metric = object()
     fit_kwargs = {}
 
     def fake_fit_model(*_args, **kwargs):
@@ -508,6 +544,7 @@ def test_train_model_forwards_finetuning_settings(
         reduce_lr_patience=4,
         reduce_lr_factor=0.3,
         min_learning_rate=1e-7,
+        additional_metrics=[custom_metric],
     )
 
     assert returned_model is model
@@ -520,6 +557,7 @@ def test_train_model_forwards_finetuning_settings(
     assert fit_kwargs["reduce_lr_patience"] == 4
     assert fit_kwargs["reduce_lr_factor"] == 0.3
     assert fit_kwargs["min_learning_rate"] == 1e-7
+    assert fit_kwargs["additional_metrics"] == [custom_metric]
 
 
 @pytest.mark.parametrize(
@@ -1121,8 +1159,7 @@ def test_predict_images_writes_prediction_report(
         output_dir,
         thresholds=(0.5, 0.7),
     )
-    report_dir = output_dir / "threshold-0.5"
-    with (report_dir / "prediction-results.csv").open(
+    with (output_dir / "prediction-report_0.5.csv").open(
         encoding="utf-8", newline=""
     ) as report_file:
         rows = list(csv.DictReader(report_file))
@@ -1145,10 +1182,12 @@ def test_predict_images_writes_prediction_report(
             "manure_probability": "0.2",
         },
     ]
-    assert not (report_dir / "first.jpg").exists()
-    assert (report_dir / "second.jpg").exists()
-    assert (report_dir / "second.json").exists()
+    assert not (output_dir / "first.jpg").exists()
+    assert not (output_dir / "second.jpg").exists()
+    assert not (output_dir / "second.json").exists()
     assert (output_dir / "threshold-0.5_ok" / "first.jpg").exists()
+    assert (output_dir / "threshold-0.5_nok" / "second.jpg").exists()
+    assert (output_dir / "threshold-0.5_nok" / "second.json").exists()
     assert predictions == [
         {"maize": 0.9, "manure": 0.1},
         {"maize": 0.8, "manure": 0.2},
@@ -1157,9 +1196,11 @@ def test_predict_images_writes_prediction_report(
     assert model.batch_inputs == [["first.jpg"], ["second.jpg"]]
     assert fake_progress[0].n == 2
     assert fake_progress[0].closed
-    assert (output_dir / "threshold-0.7" / "prediction-statistics.json").exists()
+    assert (output_dir / "prediction-report_0.7.csv").exists()
+    assert (output_dir / "prediction-statistics_0.5.json").exists()
+    assert (output_dir / "prediction-statistics_0.7.json").exists()
     statistics = json.loads(
-        (report_dir / "prediction-statistics.json").read_text(encoding="utf-8")
+        (output_dir / "prediction-statistics_0.5.json").read_text(encoding="utf-8")
     )
     assert statistics["total_files"] == 2
     assert statistics["correctly_classified_files"] == 1
@@ -1184,7 +1225,7 @@ def test_write_prediction_report_updates_progress(
     image_path.write_bytes(b"image")
     record = ImageRecord(image_path, ("maize",))
 
-    classifier.write_prediction_evaluation_info(
+    classifier._write_prediction_image_evaluation(
         [record],
         ["maize"],
         {str(image_path.resolve()): {"maize": 0.9}},
@@ -1215,7 +1256,7 @@ def test_write_prediction_evaluation_reads_prediction_csv(tmp_path: Path) -> Non
     assert classifier.prediction_evaluation_is_complete(output_dir, (0.5,))
     assert not classifier.prediction_evaluation_is_complete(output_dir, (0.5, 0.7))
 
-    with (output_dir / "threshold-0.5" / "prediction-results.csv").open(
+    with (output_dir / "prediction-report_0.5.csv").open(
         encoding="utf-8", newline=""
     ) as report_file:
         rows = list(csv.DictReader(report_file))
