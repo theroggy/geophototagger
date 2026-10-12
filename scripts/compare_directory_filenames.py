@@ -9,7 +9,6 @@ def main() -> None:
     """Print the sorted filename keys shared by each configured pair."""
     project = "maizemulch"
     trainingdata_dir = Path(f"X:/Monitoring/phototagger/{project}/trainingdata")
-    testdata_dir = Path("Q:/phototagger/trainingdata_raw")
 
     directory_pairs = [
         (trainingdata_dir / "train", trainingdata_dir / "validation"),
