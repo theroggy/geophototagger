@@ -295,7 +295,7 @@ def _prediction_progress_callback(
     )
 
 
-def write_prediction_evaluation_info(
+def _write_prediction_image_evaluation(
     records: list[ImageRecord],
     classes: list[str],
     predictions_by_path: dict[str, dict[str, float]],
@@ -303,7 +303,23 @@ def write_prediction_evaluation_info(
     threshold: float,
     output_dir: Path,
 ) -> None:
-    """Write an evaluation information for one classification threshold."""
+    """Write image evaluation information for one classification threshold.
+
+    This function evaluates the predictions for each image against the expected labels,
+    calculates per-label statistics, and writes the results to a CSV file.
+
+    It also creates subdirectories with the images split into "ok" and "nok" directories
+    based on whether they were correctly classified according to the specified
+    threshold.
+
+    Args:
+        records: A list of ImageRecord objects representing the images to evaluate.
+        classes: A list of class labels.
+        predictions_by_path: A dictionary mapping image paths to predicted
+            probabilities for each class.
+        threshold: The classification threshold for determining predicted labels.
+        output_dir: The directory where evaluation results will be written.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     label_statistics = {
         label: {
@@ -315,9 +331,11 @@ def write_prediction_evaluation_info(
         for label in classes
     }
     correctly_classified_count = 0
-    output_dir_ok = output_dir.parent / f"{output_dir.name}_ok"
-    output_dir_ok.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / "prediction-results.csv"
+    output_ok_dir = output_dir.parent / f"threshold-{threshold:g}_ok"
+    output_ok_dir.mkdir(parents=True, exist_ok=True)
+    output_nok_dir = output_dir.parent / f"threshold-{threshold:g}_nok"
+    output_nok_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / f"prediction-results_{threshold:g}.csv"
     with report_path.open("w", encoding="utf-8", newline="") as report_file:
         writer = csv.DictWriter(
             report_file,
@@ -367,8 +385,8 @@ def write_prediction_evaluation_info(
             # Copy the image and write the JSON metadata to the appropriate output
             # directory based on classification correctness.
             if correctly_classified:
-                dst_path = output_dir_ok / record.image_path.name
-                json_dst_path = output_dir_ok / f"{record.image_path.stem}.json"
+                dst_path = output_ok_dir / record.image_path.name
+                json_dst_path = output_ok_dir / f"{record.image_path.stem}.json"
             else:
                 dst_path = output_dir / record.image_path.name
                 json_dst_path = output_dir / f"{record.image_path.stem}.json"
@@ -412,7 +430,7 @@ def write_prediction_evaluation_info(
             else 0.0,
         }
     misclassified_count = record_count - correctly_classified_count
-    (output_dir / "prediction-statistics.json").write_text(
+    (output_dir / f"prediction-statistics_{threshold:g}.json").write_text(
         json.dumps(
             {
                 "classification_threshold": threshold,
@@ -1314,11 +1332,9 @@ def prediction_evaluation_is_complete(
         return False
 
     return all(
-        (report_dir / "prediction-results.csv").is_file()
-        and (report_dir / "prediction-statistics.json").is_file()
-        for report_dir in (
-            output_dir / f"threshold-{threshold:g}" for threshold in thresholds
-        )
+        (output_dir / f"prediction-results_{threshold:g}.csv").is_file()
+        and (output_dir / f"prediction-statistics_{threshold:g}.json").is_file()
+        for threshold in thresholds
     )
 
 
@@ -1365,17 +1381,16 @@ def write_prediction_evaluation(
             )
 
     for threshold in thresholds:
-        report_dir = output_dir / f"threshold-{threshold:g}"
-        report_path = report_dir / "prediction-results.csv"
-        statistics_path = report_dir / "prediction-statistics.json"
+        report_path = output_dir / f"prediction-results_{threshold:g}.csv"
+        statistics_path = output_dir / f"prediction-statistics_{threshold:g}.json"
         if report_path.exists() and statistics_path.exists():
             continue
-        write_prediction_evaluation_info(
+        _write_prediction_image_evaluation(
             records,
             classes,
             predictions_by_path,
             threshold=threshold,
-            output_dir=report_dir,
+            output_dir=output_dir,
         )
 
 

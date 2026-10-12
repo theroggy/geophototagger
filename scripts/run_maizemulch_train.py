@@ -139,18 +139,18 @@ def main() -> None:
 
         if not predictions_path.exists():
             predict_images(
-                model_path,
-                records,
+                model_path=model_path,
+                records=records,
                 workers=4,
                 output_path=predictions_path,
             )
 
         write_prediction_evaluation(
-            records,
-            sorted(classes),
-            predictions_path,
-            output_dir,
-            evaluation_thresholds,
+            records=records,
+            classes=sorted(classes),
+            predictions_path=predictions_path,
+            output_dir=output_dir,
+            evaluation_thresholds=evaluation_thresholds,
         )
 
 

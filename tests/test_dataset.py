@@ -1159,8 +1159,7 @@ def test_predict_images_writes_prediction_report(
         output_dir,
         thresholds=(0.5, 0.7),
     )
-    report_dir = output_dir / "threshold-0.5"
-    with (report_dir / "prediction-results.csv").open(
+    with (output_dir / "prediction-results_0.5.csv").open(
         encoding="utf-8", newline=""
     ) as report_file:
         rows = list(csv.DictReader(report_file))
@@ -1183,10 +1182,10 @@ def test_predict_images_writes_prediction_report(
             "manure_probability": "0.2",
         },
     ]
-    assert not (report_dir / "first.jpg").exists()
-    assert (report_dir / "second.jpg").exists()
-    assert (report_dir / "second.json").exists()
-    assert (output_dir / "threshold-0.5_ok" / "first.jpg").exists()
+    assert not (output_dir / "first.jpg").exists()
+    assert (output_dir / "second.jpg").exists()
+    assert (output_dir / "second.json").exists()
+    assert (output_dir.parent / "threshold-0.5_ok" / "first.jpg").exists()
     assert predictions == [
         {"maize": 0.9, "manure": 0.1},
         {"maize": 0.8, "manure": 0.2},
@@ -1195,9 +1194,11 @@ def test_predict_images_writes_prediction_report(
     assert model.batch_inputs == [["first.jpg"], ["second.jpg"]]
     assert fake_progress[0].n == 2
     assert fake_progress[0].closed
-    assert (output_dir / "threshold-0.7" / "prediction-statistics.json").exists()
+    assert (output_dir / "prediction-results_0.7.csv").exists()
+    assert (output_dir / "prediction-statistics_0.5.json").exists()
+    assert (output_dir / "prediction-statistics_0.7.json").exists()
     statistics = json.loads(
-        (report_dir / "prediction-statistics.json").read_text(encoding="utf-8")
+        (output_dir / "prediction-statistics_0.5.json").read_text(encoding="utf-8")
     )
     assert statistics["total_files"] == 2
     assert statistics["correctly_classified_files"] == 1
@@ -1222,7 +1223,7 @@ def test_write_prediction_report_updates_progress(
     image_path.write_bytes(b"image")
     record = ImageRecord(image_path, ("maize",))
 
-    classifier.write_prediction_evaluation_info(
+    classifier._write_prediction_image_evaluation(
         [record],
         ["maize"],
         {str(image_path.resolve()): {"maize": 0.9}},
@@ -1253,7 +1254,7 @@ def test_write_prediction_evaluation_reads_prediction_csv(tmp_path: Path) -> Non
     assert classifier.prediction_evaluation_is_complete(output_dir, (0.5,))
     assert not classifier.prediction_evaluation_is_complete(output_dir, (0.5, 0.7))
 
-    with (output_dir / "threshold-0.5" / "prediction-results.csv").open(
+    with (output_dir / "prediction-results_0.5.csv").open(
         encoding="utf-8", newline=""
     ) as report_file:
         rows = list(csv.DictReader(report_file))
