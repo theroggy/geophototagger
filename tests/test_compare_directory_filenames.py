@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from scripts.compare_directory_filenames import remove_internal_duplicates
+from scripts.remove_duplicate_images import remove_internal_duplicates
 
 
 def test_remove_internal_duplicates_keeps_first_path(tmp_path: Path) -> None:

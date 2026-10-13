@@ -4,12 +4,6 @@ import logging
 import os
 from pathlib import Path
 
-from phototagger.custom.classifier import (
-    predict_images,
-    prediction_evaluation_is_complete,
-    train_model,
-    write_prediction_evaluation,
-)
 from phototagger.custom.dataset import (
     determine_classes,
     discover_records,
@@ -17,6 +11,12 @@ from phototagger.custom.dataset import (
     read_manifest,
     write_manifest,
 )
+from phototagger.custom.prediction import (
+    predict_images,
+    prediction_evaluation_is_complete,
+    write_prediction_evaluation,
+)
+from phototagger.custom.training import train_model
 
 
 def main() -> None:
@@ -26,7 +26,7 @@ def main() -> None:
 
     # Edit these values for the training run you want to execute.
     project = "maizemulch"
-    version = "02-b0-0.7"
+    version = "03-b0-0.7-cubic"
     classes = {"korrelmais"}
     image_size = (512, 512)
     crop_window_scale = 0.7
