@@ -3,6 +3,7 @@
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from phototagger.custom.dataset import (
     determine_classes,
@@ -18,6 +19,9 @@ from phototagger.custom.prediction import (
 )
 from phototagger.custom.training import train_model
 
+if TYPE_CHECKING:
+    from phototagger.custom.image_processing import ImageInterpolation
+
 
 def main() -> None:
     """Train a model and write evaluation results."""
@@ -30,7 +34,7 @@ def main() -> None:
     classes = {"korrelmais"}
     image_size = (512, 512)
     crop_window_scale = 0.7
-    interpolation = "bicubic"
+    interpolation: ImageInterpolation = "bicubic"
     backbone = "EfficientNetV2B0"
     evaluation_thresholds = (0.5, 0.6)
     # Use FBeta with beta=0.5 to give more weight to precision because we want to avoid
