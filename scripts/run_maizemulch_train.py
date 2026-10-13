@@ -3,6 +3,7 @@
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from phototagger.custom.dataset import (
     determine_classes,
@@ -18,6 +19,9 @@ from phototagger.custom.prediction import (
 )
 from phototagger.custom.training import train_model
 
+if TYPE_CHECKING:
+    from phototagger.custom.image_processing import ImageInterpolation
+
 
 def main() -> None:
     """Train a model and write evaluation results."""
@@ -26,7 +30,7 @@ def main() -> None:
 
     # Edit these values for the training run you want to execute.
     project = "maizemulch"
-    version = "03-b0-0.7-cubic"
+    version = "03-b0-0.7-bicubic"
     classes = {"korrelmais"}
     image_size = (512, 512)
     crop_window_scale = 0.7

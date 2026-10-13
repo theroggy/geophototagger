@@ -137,21 +137,36 @@ def _configure_fake_predictor(
 @pytest.mark.parametrize(
     "crop_settings",
     [
-        ({"crop_to_aspect_ratio": True, "crop_window_scale": 0.75}, True, 0.75),
+        (
+            {
+                "crop_to_aspect_ratio": True,
+                "crop_window_scale": 0.75,
+                "interpolation": "lanczos",
+            },
+            True,
+            0.75,
+            "lanczos",
+        ),
         (
             {"crop_to_aspect_ratio": True, "aspect_ratio_crop_percent": 25},
             True,
             0.75,
+            "nearest",
         ),
-        ({}, False, 1.0),
+        ({}, False, 1.0, "nearest"),
     ],
 )
 def test_predict_image_uses_crop_setting_from_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    crop_settings: tuple[dict[str, bool | float | int], bool, float],
+    crop_settings: tuple[dict[str, bool | float | int | str], bool, float, str],
 ) -> None:
-    stored_crop_settings, expected_crop_setting, expected_crop_scale = crop_settings
+    (
+        stored_crop_settings,
+        expected_crop_setting,
+        expected_crop_scale,
+        expected_interpolation,
+    ) = crop_settings
     model_path = tmp_path / "model.keras"
     metadata = {"labels": ["maize"], "image_size": [8, 8]}
     metadata.update(stored_crop_settings)
@@ -167,10 +182,12 @@ def test_predict_image_uses_crop_setting_from_metadata(
         *,
         crop_to_aspect_ratio,
         crop_window_scale,
+        interpolation,
     ):
         prediction_options["image_size"] = image_size
         prediction_options["crop_to_aspect_ratio"] = crop_to_aspect_ratio
         prediction_options["crop_window_scale"] = crop_window_scale
+        prediction_options["interpolation"] = interpolation
         return "image batch"
 
     monkeypatch.setattr(module, "_load_images", load_images)
@@ -182,6 +199,7 @@ def test_predict_image_uses_crop_setting_from_metadata(
         "image_size": (8, 8),
         "crop_to_aspect_ratio": expected_crop_setting,
         "crop_window_scale": expected_crop_scale,
+        "interpolation": expected_interpolation,
     }
 
 

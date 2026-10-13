@@ -265,6 +265,7 @@ def test_train_model_forwards_finetuning_settings(
         unfrozen_backbone_layers=layer_count,
         crop_to_aspect_ratio=False,
         crop_window_scale=0.75,
+        interpolation="bicubic",
         learning_rate=5e-4,
         head_dropout=0.35,
         head_l2=0.002,
@@ -278,6 +279,7 @@ def test_train_model_forwards_finetuning_settings(
     assert fit_kwargs["unfrozen_backbone_layers"] == layer_count
     assert fit_kwargs["crop_to_aspect_ratio"] is False
     assert fit_kwargs["crop_window_scale"] == 0.75
+    assert fit_kwargs["interpolation"] == "bicubic"
     assert fit_kwargs["learning_rate"] == 5e-4
     assert fit_kwargs["head_dropout"] == 0.35
     assert fit_kwargs["head_l2"] == 0.002
