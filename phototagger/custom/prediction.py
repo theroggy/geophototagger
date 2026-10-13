@@ -40,6 +40,7 @@ def predict_image(model_path: Path, image_path: Path) -> dict[str, float]:
     image_size = tuple(metadata["image_size"])
     crop_to_aspect_ratio = metadata.get("crop_to_aspect_ratio", False)
     crop_window_scale = _crop_window_scale_from_metadata(metadata)
+    interpolation = metadata.get("interpolation", "nearest")
     keras = _keras()
     model = keras.models.load_model(model_path)
     image = _load_images(
@@ -47,6 +48,7 @@ def predict_image(model_path: Path, image_path: Path) -> dict[str, float]:
         image_size,
         crop_to_aspect_ratio=crop_to_aspect_ratio,
         crop_window_scale=crop_window_scale,
+        interpolation=interpolation,
     )
     logging.info("Predicting %s", image_path)
     probabilities = model.predict(image, verbose=0)[0]
@@ -85,6 +87,7 @@ def predict_images(
     image_size = tuple(metadata["image_size"])
     crop_to_aspect_ratio = metadata.get("crop_to_aspect_ratio", False)
     crop_window_scale = _crop_window_scale_from_metadata(metadata)
+    interpolation = metadata.get("interpolation", "nearest")
     labels = metadata["labels"]
 
     records = [
@@ -146,6 +149,7 @@ def predict_images(
         image_size,
         crop_to_aspect_ratio=crop_to_aspect_ratio,
         crop_window_scale=crop_window_scale,
+        interpolation=interpolation,
         batch_size=batch_size,
     )
     output_context = (

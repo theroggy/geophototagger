@@ -19,6 +19,7 @@ from .image_processing import (
 
 if TYPE_CHECKING:
     from .dataset import ImageRecord
+    from .image_processing import ImageInterpolation
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ def train_model(
     image_size: tuple[int, int] = (224, 224),
     crop_to_aspect_ratio: bool = True,
     crop_window_scale: float = 1.0,
+    interpolation: ImageInterpolation = "bilinear",
     backbone: str = "EfficientNetV2S",
     weights: str | None = "imagenet",
     epochs: int = 300,
@@ -111,6 +113,7 @@ def train_model(
         crop_window_scale: Fraction of each aspect-fitted crop dimension to
             keep. Values below one tighten the centered crop when resolution
             permits; ``1.0`` keeps the standard aspect-ratio crop.
+        interpolation: Pillow resampling filter name used to resize images.
         backbone: Name of the Keras Applications backbone.
         weights: Backbone weights, typically ``"imagenet"`` or ``None``.
         epochs: Number of training epochs.
@@ -192,6 +195,7 @@ def train_model(
             image_size=image_size,
             crop_to_aspect_ratio=crop_to_aspect_ratio,
             crop_window_scale=crop_window_scale,
+            interpolation=interpolation,
             backbone=backbone,
             weights=weights,
             epochs=epochs,
@@ -518,6 +522,7 @@ def _fit_model(
     image_size: tuple[int, int],
     crop_to_aspect_ratio: bool,
     crop_window_scale: float,
+    interpolation: ImageInterpolation,
     backbone: str,
     weights: str | None,
     epochs: int,
@@ -550,6 +555,7 @@ def _fit_model(
             ratio before resizing, rather than stretch them.
         crop_window_scale: Fraction of each aspect-fitted crop dimension to keep.
             Values below one tighten the centered crop when resolution permits.
+        interpolation: Pillow resampling filter name used to resize images.
         backbone: Keras Applications backbone name.
         weights: Initial backbone weights, or ``None``.
         epochs: Total epochs.
@@ -610,6 +616,7 @@ def _fit_model(
             labels=validation_labels,
             crop_to_aspect_ratio=crop_to_aspect_ratio,
             crop_window_scale=crop_window_scale,
+            interpolation=interpolation,
             batch_size=batch_size,
             **dataset_kwargs,
         )
@@ -625,6 +632,7 @@ def _fit_model(
         sample_weights=sample_weights,
         crop_to_aspect_ratio=crop_to_aspect_ratio,
         crop_window_scale=crop_window_scale,
+        interpolation=interpolation,
         batch_size=batch_size,
         shuffle=True,
         **dataset_kwargs,
@@ -703,6 +711,7 @@ def _fit_model(
                 "image_size": list(image_size),
                 "crop_to_aspect_ratio": crop_to_aspect_ratio,
                 "crop_window_scale": crop_window_scale,
+                "interpolation": interpolation,
                 "backbone": backbone,
                 "threshold": 0.5,
                 "augmentation": augment,

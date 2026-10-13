@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -14,6 +14,15 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .dataset import ImageRecord
+
+ImageInterpolation = Literal[
+    "nearest",
+    "box",
+    "bilinear",
+    "hamming",
+    "bicubic",
+    "lanczos",
+]
 
 
 def _keras() -> Any:
@@ -30,6 +39,7 @@ def _load_image_batch(
     *,
     crop_to_aspect_ratio: bool = True,
     crop_window_scale: float = 1.0,
+    interpolation: ImageInterpolation = "bilinear",
 ) -> np.ndarray:
     """Load a batch of images into a single ndarray."""
     _validate_crop_window_scale(crop_window_scale)
@@ -44,6 +54,7 @@ def _load_image_batch(
                     image_size,
                     crop_to_aspect_ratio=crop_to_aspect_ratio,
                     crop_window_scale=crop_window_scale,
+                    interpolation=interpolation,
                 )
             except OSError as error:
                 raise OSError(
@@ -65,6 +76,7 @@ def _load_img(
     *,
     crop_to_aspect_ratio: bool = True,
     crop_window_scale: float = 1.0,
+    interpolation: ImageInterpolation = "bilinear",
 ) -> Image.Image:
     """Load an RGB image and resize it to the requested dimensions.
 
@@ -80,6 +92,7 @@ def _load_img(
             in both dimensions. Otherwise, the standard aspect-ratio crop is
             used. This option has no effect when ``crop_to_aspect_ratio`` is
             false.
+        interpolation: Pillow resampling filter name to use when resizing.
 
     Returns:
         The resized RGB image.
@@ -113,7 +126,8 @@ def _load_img(
         image = image.crop((left, top, left + crop_width, top + crop_height))
 
     return image.resize(
-        (target_width, target_height), resample=Image.Resampling.NEAREST
+        (target_width, target_height),
+        resample=Image.Resampling[interpolation.upper()],
     )
 
 
@@ -140,6 +154,7 @@ def _load_images(
     *,
     crop_to_aspect_ratio: bool = True,
     crop_window_scale: float = 1.0,
+    interpolation: ImageInterpolation = "bilinear",
 ) -> Any:
     keras = _keras()
     return keras.ops.convert_to_tensor(
@@ -148,6 +163,7 @@ def _load_images(
             image_size,
             crop_to_aspect_ratio=crop_to_aspect_ratio,
             crop_window_scale=crop_window_scale,
+            interpolation=interpolation,
         )
     )
 
@@ -165,6 +181,7 @@ def _make_image_sequence_class(keras: Any) -> type:
             sample_weights: np.ndarray | None = None,
             crop_to_aspect_ratio: bool = True,
             crop_window_scale: float = 1.0,
+            interpolation: ImageInterpolation = "bilinear",
             batch_size: int = 32,
             shuffle: bool = False,
             **kwargs: Any,
@@ -176,6 +193,7 @@ def _make_image_sequence_class(keras: Any) -> type:
             self.sample_weights = sample_weights
             self.crop_to_aspect_ratio = crop_to_aspect_ratio
             self.crop_window_scale = crop_window_scale
+            self.interpolation = interpolation
             self.batch_size = batch_size
             self.shuffle = shuffle
             self.indices = np.arange(len(records))
@@ -193,6 +211,7 @@ def _make_image_sequence_class(keras: Any) -> type:
                 self.image_size,
                 crop_to_aspect_ratio=self.crop_to_aspect_ratio,
                 crop_window_scale=self.crop_window_scale,
+                interpolation=self.interpolation,
             )
             if self.labels is None:
                 return batch_images

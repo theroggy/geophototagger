@@ -26,10 +26,11 @@ def main() -> None:
 
     # Edit these values for the training run you want to execute.
     project = "maizemulch"
-    version = "03-b0-0.7-cubic"
+    version = "03-b0-0.7-bicubic"
     classes = {"korrelmais"}
     image_size = (512, 512)
     crop_window_scale = 0.7
+    interpolation = "bicubic"
     backbone = "EfficientNetV2B0"
     evaluation_thresholds = (0.5, 0.6)
     # Use FBeta with beta=0.5 to give more weight to precision because we want to avoid
@@ -108,6 +109,7 @@ def main() -> None:
             validation_images=validation_images,
             image_size=image_size,
             crop_window_scale=crop_window_scale,
+            interpolation=interpolation,
             backbone=backbone,
             additional_metrics=additional_metrics,
             monitor_metric=monitor_metric,
