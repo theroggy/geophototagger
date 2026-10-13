@@ -1,14 +1,10 @@
 """Train a custom phototagger model."""
 
 import logging
+import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from phototagger.custom.classifier import (
-    predict_images,
-    prediction_evaluation_is_complete,
-    train_model,
-    write_prediction_evaluation,
-)
 from phototagger.custom.dataset import (
     determine_classes,
     discover_records,
@@ -16,39 +12,72 @@ from phototagger.custom.dataset import (
     read_manifest,
     write_manifest,
 )
+from phototagger.custom.prediction import (
+    predict_images,
+    prediction_evaluation_is_complete,
+    write_prediction_evaluation,
+)
+from phototagger.custom.training import train_model
+
+if TYPE_CHECKING:
+    from phototagger.custom.image_processing import ImageInterpolation
 
 
 def main() -> None:
     """Train a model and write evaluation results."""
+    os.environ.setdefault("KERAS_BACKEND", "torch")
+    import keras  # noqa: PLC0415
+
     # Edit these values for the training run you want to execute.
     project = "maizemulch"
-    version = "01-b0-0.7"
-    project_dir = Path(f"X:/Monitoring/phototagger/{project}")
-    project_dir.mkdir(parents=True, exist_ok=True)
-    train_log_dir = project_dir / "train_log" / version
-    train_log_dir.mkdir(parents=True, exist_ok=True)
-    train_manifest_path = train_log_dir / "train-images.csv"
-    validation_manifest_path = train_log_dir / "validation-images.csv"
+    version = "03-b0-0.7-bicubic"
+    classes = {"korrelmais"}
+    image_size = (512, 512)
+    crop_window_scale = 0.7
+    backbone = "EfficientNetV2B0"
+    evaluation_thresholds = (0.5, 0.6)
+    # Use FBeta with beta=0.5 to give more weight to precision because we want to avoid
+    # false positive "maizemulch" predictions.
+    additional_metrics = [
+        keras.metrics.FBetaScore(
+            beta=0.5, average="macro", threshold=0.5, name="fbeta_prec"
+        ),
+    ]
+    monitor_metric = "val_loss"
+    force = False
 
+    project_dir = Path(f"X:/Monitoring/phototagger/{project}")
     trainingdata_dir = Path(f"X:/Monitoring/phototagger/{project}/trainingdata")
     train_data_dir = trainingdata_dir / "train"
-    validation_data_dir = trainingdata_dir / "validation"
-    moeilijk_data_dir = trainingdata_dir / "moeilijk"
+    val_data_dir = trainingdata_dir / "validation"
+    doubt_data_dir = trainingdata_dir / "twijfel"
 
-    trainingdata_eval_dir = project_dir / "trainingdata_eval"
+    traindata_eval_dir = project_dir / "trainingdata_eval"
     testdata_dir = Path("Q:/phototagger/trainingdata_raw")
     evaluation_dirs = [
-        (train_data_dir, trainingdata_eval_dir / f"{version}/train"),
-        (validation_data_dir, trainingdata_eval_dir / f"{version}/validation"),
-        (moeilijk_data_dir, trainingdata_eval_dir / f"{version}/moeilijk"),
+        (train_data_dir, traindata_eval_dir / f"{version}/{train_data_dir.name}"),
+        (val_data_dir, traindata_eval_dir / f"{version}/{val_data_dir.name}"),
+        (doubt_data_dir, traindata_eval_dir / f"{version}/{doubt_data_dir.name}"),
         (testdata_dir / "varia/test", None),
         (testdata_dir / "varia/test_extra", None),
         (testdata_dir / "korrelmais/agrilens_korrelmais_2023", None),
         (testdata_dir / "korrelmais/agrilens_korrelmais_2024", None),
         (testdata_dir / "korrelmais/agrilens_korrelmais_2025", None),
+        (testdata_dir / "stalmest/agrilens_stalmest_2023", None),
+        (testdata_dir / "stalmest/agrilens_stalmest_2024", None),
         (testdata_dir / "stalmest/agrilens_stalmest_2025", None),
         (testdata_dir / "grasklaver/overview.csv", None),
     ]
+
+    model_dir = project_dir / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / f"phototagger-{project}_{version}.keras"
+
+    project_dir.mkdir(parents=True, exist_ok=True)
+    train_log_dir = project_dir / "train_log" / version
+    train_log_dir.mkdir(parents=True, exist_ok=True)
+    train_manifest_path = train_log_dir / "train-images.csv"
+    validation_manifest_path = train_log_dir / "validation-images.csv"
 
     # Init logging
     logging.basicConfig(
@@ -59,31 +88,7 @@ def main() -> None:
         ],
     )
 
-    logging.info("Starting the training run.")
-    model_dir = project_dir / "models"
-    model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / f"phototagger-{project}_{version}.keras"
-    classes = {"korrelmais"}
-    image_size = (512, 512)
-    crop_to_aspect_ratio = True
-    crop_window_scale = 0.7
-    backbone = "EfficientNetV2B0"
-    weights = "imagenet"
-    evaluation_thresholds = (0.5, 0.6)
-    skip_completed_evaluations = True
-    frozen_backbone_epochs = 5
-    unfrozen_backbone_layers = 0.15
-    learning_rate = 1e-3
-    head_dropout = 0.5
-    head_l2 = 0.005
-    early_stopping_patience = 30
-    reduce_lr_patience = 10
-    reduce_lr_factor = 0.2
-    min_learning_rate = 1e-6
-    force = False
-    batch_size = 16
-    epochs = 100
-
+    logging.info(f"Starting the training run {version} of project {project}.")
     if model_path.exists():
         logging.info(f"Model already exists at {model_path}, skipping training.")
     else:
@@ -92,11 +97,11 @@ def main() -> None:
             train_data_dir, train_manifest_path, classes=classes, force=force
         )
         write_manifest(
-            validation_data_dir, validation_manifest_path, classes=classes, force=force
+            val_data_dir, validation_manifest_path, classes=classes, force=force
         )
         train_images = read_manifest(train_manifest_path, dataset_root=train_data_dir)
         validation_images = read_manifest(
-            validation_manifest_path, dataset_root=validation_data_dir
+            validation_manifest_path, dataset_root=val_data_dir
         )
 
         # Train the model with the specified parameters.
@@ -106,40 +111,25 @@ def main() -> None:
             output_path=model_path,
             validation_images=validation_images,
             image_size=image_size,
-            crop_to_aspect_ratio=crop_to_aspect_ratio,
             crop_window_scale=crop_window_scale,
             backbone=backbone,
-            weights=weights,
-            epochs=epochs,
-            class_weighting=False,
-            batch_size=batch_size,
-            frozen_backbone_epochs=frozen_backbone_epochs,
-            unfrozen_backbone_layers=unfrozen_backbone_layers,
-            learning_rate=learning_rate,
-            head_dropout=head_dropout,
-            head_l2=head_l2,
-            early_stopping_patience=early_stopping_patience,
-            reduce_lr_patience=reduce_lr_patience,
-            reduce_lr_factor=reduce_lr_factor,
-            min_learning_rate=min_learning_rate,
-            # monitor_metric="val_precision",
-            force=force,
+            additional_metrics=additional_metrics,
+            monitor_metric=monitor_metric,
         )
 
     # Evaluate the trained model on the specified evaluation inputs.
     for input_path, output_dir in evaluation_dirs:
         if output_dir is None:
             output_dir = input_path.parent / f"{input_path.stem}_{version}"
-        if skip_completed_evaluations and prediction_evaluation_is_complete(
-            output_dir, evaluation_thresholds
-        ):
+        if prediction_evaluation_is_complete(output_dir, evaluation_thresholds):
             logging.info("Evaluation already complete for %s; skipping", input_path)
             continue
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        logging.info(f"Run predict on {input_path} to {output_dir}")
         predictions_path = output_dir / "predictions.csv"
         if input_path.suffix.lower() == ".csv":
-            records = discover_records_csv(
+            images = discover_records_csv(
                 input_path,
                 image_path_column="image",
                 classes_column="type",
@@ -147,26 +137,24 @@ def main() -> None:
                 label_whitelist=classes,
             )
         else:
-            records = discover_records(input_path, label_whitelist=classes)
-        if not records:
+            images = discover_records(input_path, label_whitelist=classes)
+        if not images:
             raise ValueError(f"No images found in {input_path}")
 
         if not predictions_path.exists():
-            logging.info(f"Run predict on {input_path} to {output_dir}")
             predict_images(
-                model_path,
-                records,
-                batch_size=batch_size,
+                model_path=model_path,
+                images=images,
                 workers=4,
                 output_path=predictions_path,
             )
 
         write_prediction_evaluation(
-            records,
-            sorted(classes),
-            predictions_path,
-            output_dir,
-            evaluation_thresholds,
+            images=images,
+            classes=sorted(classes),
+            predictions=predictions_path,
+            output_dir=output_dir,
+            thresholds=evaluation_thresholds,
         )
 
 

@@ -1,0 +1,13 @@
+name: phototagger-latest
+channels:
+  - conda-forge
+dependencies:
+  - python
+  - pip
+  - keras
+  - numpy
+  - pillow
+  - pytorch
+  - timm
+  - tqdm
+  - pytest

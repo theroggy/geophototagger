@@ -1,0 +1,13 @@
+name: phototagger-minimal
+channels:
+  - conda-forge
+dependencies:
+  - python
+  - pip
+  - keras =3.0
+  - numpy =1.23
+  - pillow =10.0
+  - pytorch =2.0
+  - timm =0.9
+  - tqdm =4.65
+  - pytest
